@@ -1,0 +1,22 @@
+# Web Framework
+Flask==2.3.3
+gunicorn==21.2.0
+
+# Computer Vision
+opencv-python==4.8.0.74
+numpy==1.24.3
+
+# Face Recognition
+insightface==0.7.3
+onnxruntime-gpu==1.15.1  # Hoặc onnxruntime==1.15.1 nếu không có GPU
+
+# Anti-Spoofing (Face Liveness Detection)
+torch>=1.10.0  # PyTorch for MiniFASNet
+torchvision>=0.11.0
+
+# Vector Search
+faiss-cpu==1.7.4  # Hoặc faiss-gpu nếu có GPU
+
+# Utilities
+Pillow==10.0.0
+

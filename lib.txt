@@ -1,0 +1,15 @@
+conda create --prefix /home/coder/trong/computer_vision/face_auth_system/.env_cv/ python=3.9.19 -y
+
+conda activate /home/coder/trong/computer_vision/face_auth_system/.env_cv
+
+pip install torch==2.3.1+cu118 torchvision==0.18.1+cu118 torchaudio==2.3.1+cu118 \
+  --index-url https://download.pytorch.org/whl/cu118
+
+pip install onnxruntime-gpu==1.16.3
+
+pip install insightface==0.7.3
+
+pip install numpy==1.23.5 scipy==1.10.1
+
+pip install opencv-python==4.10.0.84 opencv-python-headless==4.10.0.84
+

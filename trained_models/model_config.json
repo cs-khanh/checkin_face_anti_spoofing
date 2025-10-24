@@ -1,0 +1,33 @@
+{
+  "face_detection": {
+    "model_type": "insightface_scrfd",
+    "model_path": "detection/det_10g.onnx",
+    "confidence_threshold": 0.5,
+    "nms_threshold": 0.4,
+    "max_size": 640,
+    "device": "gpu",
+    "providers": ["CUDAExecutionProvider", "CPUExecutionProvider"],
+    "gpu_id": 0
+  },
+  "face_recognition": {
+    "model_type": "insightface_arcface",
+    "model_path": "recognition/w600k_r50.onnx",
+    "rec_batch_size": 4,
+    "embedding_size": 512,
+    "recognition_threshold": 0.45,
+    "device": "gpu",
+    "providers": ["CUDAExecutionProvider", "CPUExecutionProvider"],
+    "gpu_id": 0
+  },
+  "anti_spoofing": {
+    "enabled": true,
+    "config_path": "anti_spoofing/liveness_config.json",
+    "device": "gpu"
+  },
+  "landmark_model": {
+    "enabled": true,
+    "model_path": "landmark/2d106det.onnx",
+    "align_mode": "5_points",
+    "device": "gpu"
+  }
+}

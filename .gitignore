@@ -1,0 +1,7 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+
+data_embedding/
+*.jpg
+*.npz
+trained_models/recognition/w600k_r50.onnx
