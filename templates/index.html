@@ -26,7 +26,7 @@
                             {% endif %}
                         {% endwith %}
                         
-                        <form action="{{ url_for('login') }}" method="POST">
+                        <form action="{{ url_for('manage') }}" method="POST">
                             <div class="mb-3">
                                 <label for="username" class="form-label">Tên đăng nhập</label>
                                 <input type="text" class="form-control" id="username" name="username" required>
@@ -36,7 +36,7 @@
                                 <input type="password" class="form-control" id="password" name="password" required>
                             </div>
                             <div class="d-grid">
-                                <button type="submit" class="btn btn-primary btn-lg">Đăng nhập</button>
+                                <button id="login-btn" type="submit" class="btn btn-primary btn-lg">Đăng nhập</button>
                             </div>
                         </form>
                     </div>
@@ -46,9 +46,10 @@
                     <div class="card-body p-4">
                         <h4 class="mb-3">Check-in/Check-out nhanh</h4>
                         <p class="text-muted mb-3">Đi thẳng đến màn hình chấm công mà không cần đăng nhập</p>
-                        <div class="d-grid">
-                            <a href="{{ url_for('checkin') }}" class="btn btn-outline-primary">Đi đến màn hình chấm công</a>
-                        </div>
+                            <div class="d-grid">
+                                <!-- keep the Bootstrap class but add an extra class to change the color -->
+                                <a href="{{ url_for('checkin') }}" class="btn btn-outline-primary">Đi đến màn hình chấm công</a>
+                            </div>
                     </div>
                 </div>
             </div>

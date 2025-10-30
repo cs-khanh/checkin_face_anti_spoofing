@@ -58,6 +58,17 @@ body {
     border-color: #0a58ca;
 }
 
+/* Specific hover for the login button to make it more visible */
+#login-btn {
+    transition: transform 0.18s ease, background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+#login-btn:hover {
+    background-color: var(--success-color) !important;
+    border-color: var(--success-color) !important;
+    color: #fff !important;
+    transform: translateY(-1px);
+}
+
 /* Form Styles */
 .form-control {
     border-radius: 5px;

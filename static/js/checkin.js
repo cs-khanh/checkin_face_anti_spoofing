@@ -15,11 +15,8 @@ document.addEventListener('DOMContentLoaded', function() {
     const statusIndicator = document.getElementById('status-indicator');
     const recognitionName = document.getElementById('recognition-name');
     const recognitionId = document.getElementById('recognition-id');
-    // Canvas ẩn để gửi frame lên server
     const canvasCapture = document.createElement('canvas');
     const canvasCaptureCtx = canvasCapture.getContext('2d');
-    
-    // Canvas để phát hiện motion
     const canvasMotion = document.createElement('canvas');
     const canvasMotionCtx = canvasMotion.getContext('2d');
     
@@ -29,22 +26,47 @@ document.addEventListener('DOMContentLoaded', function() {
     let lastBbox = null;
     let lastName = null;
     let lastConfidence = null;
-    let detectionTimeout = null;
+    let detectionTimeout = null; // (giữ lại nhưng không dùng nữa)
+    let detectionRafId = null;   // CHANGED: id của rAF detect
     let lastFrameData = null;
-    const motionThreshold = 0.01; // 1% thay đổi pixel (nhạy hơn)
-    let isProcessing = false; // Flag để tránh gọi API trùng lặp
-    let isPaused = false; // trạng thái tạm dừng 3s
-    // Update clock
+    const motionThreshold = 0.01;
+    let isProcessing = false;
+    let isPaused = false;
+    let resumeTimer = null;
+    // CHANGED: throttle detect
+    let lastDetectTime = 0;
+    const detectInterval = 150; // ms giữa 2 lần detect (~6-7fps)
+
+    // ================== HÀM QUẢN LÝ PAUSE / RESUME ==================
+    function resumeDetection() {
+        isPaused = false;
+        if (currentStream) {
+            try { videoElement.play(); } catch(e) {}
+        }
+    }
+
+    function pauseDetection(ms) {
+        isPaused = true;
+        try { videoElement.pause(); } catch(e) {}
+        if (resumeTimer) {
+            clearTimeout(resumeTimer);
+            resumeTimer = null;
+        }
+        if (typeof ms === 'number' && ms > 0) {
+            resumeTimer = setTimeout(() => {
+                resumeTimer = null;
+                resumeDetection();
+            }, ms);
+        }
+    }
+    // ================================================================
+
     function updateClock() {
         const now = new Date();
-        
-        // Format time: HH:MM:SS
         const hours = String(now.getHours()).padStart(2, '0');
         const minutes = String(now.getMinutes()).padStart(2, '0');
         const seconds = String(now.getSeconds()).padStart(2, '0');
         document.getElementById('current-time').textContent = `${hours}:${minutes}:${seconds}`;
-        
-        // Format date: DD/MM/YYYY
         const day = String(now.getDate()).padStart(2, '0');
         const month = String(now.getMonth() + 1).padStart(2, '0');
         const year = now.getFullYear();
@@ -53,46 +75,28 @@ document.addEventListener('DOMContentLoaded', function() {
     updateClock();
     setInterval(updateClock, 1000);
 
-
-    // // Clean up on page unload
     window.addEventListener('beforeunload', function() {
         stopCamera();
     });
     
-    // Start the camera on page load
     startCamera();
-    // // Initialize the camera
+
     async function startCamera() {
         try {
             const constraints = {
-                video: {
-                    width: { ideal: 640 },
-                    height: { ideal: 640 },
-                    facingMode: "user"
-                }
+                video: { width: { ideal: 640 }, height: { ideal: 640 }, facingMode: "user" }
             };
-            
-            // Get user media
             currentStream = await navigator.mediaDevices.getUserMedia(constraints);
             videoElement.srcObject = currentStream;
-            
-            // Wait for the video to be ready
             videoElement.onloadedmetadata = function() {
                 videoElement.play();
                 cameraStatus.classList.add('hidden');
-                
-                // Canvas setup
                 overlay.width = videoElement.videoWidth;
                 overlay.height = videoElement.videoHeight;
-                canvasCapture.width = videoElement.videoWidth;
-                canvasCapture.height = videoElement.videoHeight;
-                // Motion canvas dùng resolution thấp hơn để tính nhanh hơn
+                // CHANGED: canvasCapture size sẽ set khi capture (downscale)
                 canvasMotion.width = Math.floor(videoElement.videoWidth / 4);
                 canvasMotion.height = Math.floor(videoElement.videoHeight / 4);
-
-                // Start face detection
                 startDetectionFace();
-
             };
         } catch (error) {
             console.error('Error accessing camera:', error);
@@ -105,149 +109,120 @@ document.addEventListener('DOMContentLoaded', function() {
             cameraStatus.classList.add('error');
         }
     }
-    
-    // Stop the camera
+
     function stopCamera() {
         if (currentStream) {
-            currentStream.getTracks().forEach(track => {
-                track.stop();
-            });
+            currentStream.getTracks().forEach(track => track.stop());
             currentStream = null;
         }
-        
-            if (detectionTimeout) {
-                clearTimeout(detectionTimeout);
-                detectionTimeout = null;
-            }
+        if (detectionTimeout) {
+            clearTimeout(detectionTimeout);
+            detectionTimeout = null;
+        }
+        if (detectionRafId !== null) {            // CHANGED
+            cancelAnimationFrame(detectionRafId); // CHANGED
+            detectionRafId = null;                // CHANGED
+        }
+        if (resumeTimer) {
+            clearTimeout(resumeTimer);
+            resumeTimer = null;
+        }
+        isPaused = false;
     }
-    
-    // Tính toán mức độ chuyển động giữa 2 frame (optimized)
+
     function calculateMotion() {
         const w = canvasMotion.width;
         const h = canvasMotion.height;
-        
-        // Vẽ frame hiện tại lên canvas motion với resolution thấp (lật ngang)
         canvasMotionCtx.save();
         canvasMotionCtx.scale(-1, 1);
-        canvasMotionCtx.drawImage(videoElement, 0, 0, videoElement.videoWidth, videoElement.videoHeight, 
-                                   -w, 0, w, h);
+        canvasMotionCtx.drawImage(videoElement, 0, 0, videoElement.videoWidth, videoElement.videoHeight, -w, 0, w, h);
         canvasMotionCtx.restore();
-        
         const currentFrameData = canvasMotionCtx.getImageData(0, 0, w, h);
-        
-        // Nếu chưa có frame trước, lưu lại và return true (để gọi API lần đầu)
         if (!lastFrameData) {
             lastFrameData = currentFrameData;
             return true;
         }
-        
-        // So sánh pixel giữa 2 frame (tối ưu: bỏ qua một số pixel)
+        // CHANGED: giảm khối lượng tính toán
         let diffPixels = 0;
-        const threshold = 10; // ngưỡng khác biệt RGB
-        const step = 4; // Skip pixels để tính nhanh hơn
-        
+        const threshold = 10; // 10 -> 15
+        const step = 8;       // 4 -> 8
         for (let i = 0; i < currentFrameData.data.length; i += (4 * step)) {
             const rDiff = Math.abs(currentFrameData.data[i] - lastFrameData.data[i]);
             const gDiff = Math.abs(currentFrameData.data[i + 1] - lastFrameData.data[i + 1]);
             const bDiff = Math.abs(currentFrameData.data[i + 2] - lastFrameData.data[i + 2]);
-            
-            if (rDiff > threshold || gDiff > threshold || bDiff > threshold) {
-                diffPixels++;
-            }
+            if (rDiff > threshold || gDiff > threshold || bDiff > threshold) diffPixels++;
         }
-        
-        // Tính % pixel thay đổi
         const totalSampledPixels = Math.floor(w * h / step);
         const motionScore = diffPixels / totalSampledPixels;
-        
-        // Lưu frame hiện tại để so sánh lần sau
         lastFrameData = currentFrameData;
-        
         return motionScore > motionThreshold;
     }
-    
-    // // // Capture a frame from the video
+
     function captureFrame() {
-        // Bỏ qua nếu đang xử lý request trước đó
-        if (isProcessing) {
-            return;
-        }
-        if(isPaused) {
-            return;
-        }
-        // Kiểm tra motion trước
+        if (isProcessing || isPaused) return;
         const hasMotion = calculateMotion();
-        
-        if (!hasMotion) {
-            return; // Không có chuyển động đáng kể, bỏ qua
+        if (!hasMotion) return;
+
+        // CHANGED: downscale khi gửi server
+        const targetW = 640;
+        const targetH = 640;
+        if (canvasCapture.width !== targetW || canvasCapture.height !== targetH) {
+            canvasCapture.width = targetW;
+            canvasCapture.height = targetH;
         }
-        
-        // Đảm bảo canvasCapture luôn đúng kích thước video
-        if (canvasCapture.width !== videoElement.videoWidth || canvasCapture.height !== videoElement.videoHeight) {
-            canvasCapture.width = videoElement.videoWidth;
-            canvasCapture.height = videoElement.videoHeight;
-        }
-        const w = canvasCapture.width;
-        const h = canvasCapture.height;
-        // Lật ngang khi capture
+
         canvasCaptureCtx.save();
         canvasCaptureCtx.scale(-1, 1);
-        canvasCaptureCtx.drawImage(videoElement, -w, 0, w, h);
+        canvasCaptureCtx.drawImage(videoElement, -targetW, 0, targetW, targetH);
         canvasCaptureCtx.restore();
-        // Convert to blob và gửi lên server
+
+        // CHANGED: giảm quality ảnh
         canvasCapture.toBlob(function(blob) {
             detectionFace(blob);
-        }, 'image/jpeg', 0.9); // Giảm quality xuống 0.75 để nhanh hơn (balance quality/speed)
-    }
-    
-    // // // Start face detection process
-    function startDetectionFace() {
-            function detectLoop() {
-                captureFrame();
-                // Sử dụng requestAnimationFrame để smooth hơn, fallback setTimeout
-                detectionTimeout = setTimeout(detectLoop, 50); 
-            }
-            detectLoop();
+        }, 'image/jpeg', 0.9);
     }
 
-    // Send the frame to the backend for face detection
+    function startDetectionFace() {
+        // CHANGED: dùng rAF + throttle thay cho setTimeout(50)
+        function detectLoop(ts) {
+            if (!isPaused && (ts - lastDetectTime > detectInterval)) {
+                captureFrame();
+                lastDetectTime = ts;
+            }
+            detectionRafId = requestAnimationFrame(detectLoop);
+        }
+        detectionRafId = requestAnimationFrame(detectLoop);
+    }
+
     function detectionFace(blob) {
-        if (isPaused) return; // 🚫 nếu đang tạm dừng thì không gửi frame mới
+        if (isPaused) return;
         isProcessing = true;
-        
         const formData = new FormData();
         formData.append('image', blob, 'capture.jpg');
-        fetch('/face_detect', {
-            method: 'POST',
-            body: formData
-        })
+        fetch('/face_detect', { method: 'POST', body: formData })
         .then(response => response.json())
         .then(data => {
             if (data.pending === true) {
                 lastBbox = data.bbox || null;
                 lastName = '⏳ Đang kiểm tra...';
                 lastConfidence = 0;
-
                 infoMessage.innerHTML = `
                     <i class="bi bi-hourglass-split"></i>
                     <span>Đang kiểm tra khuôn mặt (${data.window}/5 khung hình)...</span>
                 `;
                 infoMessage.className = 'alert alert-warning';
-                return; // Chưa ra kết quả cuối, chỉ hiển thị tạm thời
+                return;
             }
-            if (data.success && !data.pending) {
-                isPaused = true;
-                videoElement.pause();
 
-                // Check for spoofing detection
+            if (data.success && !data.pending) {
+                // CHANGED: chỉ pause khi cần
                 if (data.is_real === false || data.warning) {
-                    // Spoofing detected!
+                    // Spoofing
+                    pauseDetection(3000); // dừng 3s cho user đọc cảnh báo
                     console.log(data.fail_reason);
                     lastBbox = data.bbox || null;
                     lastName = '⚠️ FAKE FACE!';
                     lastConfidence = 0;
-                    
-                    // Show warning message
                     infoMessage.innerHTML = `
                         <i class="bi bi-exclamation-triangle"></i>
                         <span>${data.warning || 'Phát hiện giả mạo! Vui lòng dùng khuôn mặt thật.'}</span>
@@ -255,32 +230,50 @@ document.addEventListener('DOMContentLoaded', function() {
                     `;
                     infoMessage.className = 'alert alert-danger';
                 } else if (data.success && data.bbox && data.confidence > 0.6) {
-                    // Valid real face
-                    lastBbox = data.bbox;
-                    lastName = data.employee_name ?? 'Unknown';
-                    lastConfidence = data.similarity;
-                    
-                    // Clear warning if any
-                    if (infoMessage.classList.contains('alert-danger')) {
-                        infoMessage.innerHTML = '';
-                        infoMessage.className = '';
+                    if (data.similarity < 0.9) {
+                        // Cần xác nhận → pause tới khi user thao tác
+                        pauseDetection();
+                        showConfirmationModal(
+                            data.employee_name || 'Unknown',
+                            data.similarity,
+                            () => {
+                                lastBbox = data.bbox;
+                                lastName = data.employee_name || 'Unknown';
+                                lastConfidence = data.similarity;
+                                infoMessage.innerHTML = '';
+                                infoMessage.className = '';
+                                resumeDetection(); // CHANGED: resume ngay khi user xác nhận
+                            },
+                            () => {
+                                lastBbox = null;
+                                lastName = null;
+                                lastConfidence = null;
+                                resumeDetection();
+                            }
+                        );
+                    } else {
+                        // Success bình thường: KHÔNG pause nữa để tránh giật
+                        lastBbox = data.bbox;
+                        lastName = data.employee_name ?? 'Unknown';
+                        lastConfidence = data.similarity;
+                        if (infoMessage.classList.contains('alert-danger')) {
+                            infoMessage.innerHTML = '';
+                            infoMessage.className = '';
+                        }
                     }
-
                 } else {
+                    // Không đạt → không pause để tránh giật; chỉ reset state
                     lastBbox = null;
                     lastName = null;
                     lastConfidence = null;
                 }
-                setTimeout(() => {
-                    videoElement.play();
-                    isPaused = false;
-                    infoMessage.innerHTML = '';
-                    infoMessage.className = '';
-                }, 1000);
-            }else {
-                    lastBbox = null;
-                    lastName = null;
-                    lastConfidence = null;
+            } else {
+                // !success (server báo fail): không pause
+                lastBbox = null;
+                lastName = null;
+                lastConfidence = null;
+                infoMessage.innerHTML = '';
+                infoMessage.className = '';
             }
         })
         .catch(error => {
@@ -290,15 +283,14 @@ document.addEventListener('DOMContentLoaded', function() {
                 <span>Lỗi kết nối với máy chủ</span>
             `;
             infoMessage.className = 'alert alert-danger';
+            // CHANGED: không pause khi lỗi, tránh giật
         })
         .finally(() => {
-            isProcessing = false; // Cho phép gọi API tiếp theo
+            isProcessing = false;
         });
     }
-    
-    // Vẽ overlay bbox mượt mà
+
     function drawOverlay() {
-        // Luôn resize overlay đúng với video
         if (overlay.width !== videoElement.videoWidth || overlay.height !== videoElement.videoHeight) {
             overlay.width = videoElement.videoWidth;
             overlay.height = videoElement.videoHeight;
@@ -308,47 +300,93 @@ document.addEventListener('DOMContentLoaded', function() {
             const [x1, y1, x2, y2] = lastBbox.map(v => Math.round(v));
             const bboxWidth = x2 - x1;
             const bboxHeight = y2 - y1;
-            const paddingPercent = 0.2; // 20%
+            const paddingPercent = 0.2;
             const paddingX = bboxWidth * paddingPercent;
             const paddingY = bboxHeight * paddingPercent;
-
-            // Mở rộng khung ra ngoài
             const x1p = Math.max(x1 - paddingX, 0);
             const y1p = Math.max(y1 - (bboxHeight * (paddingPercent + 0.15)), 0);
             const x2p = Math.min(x2 + paddingX, overlay.width);
             const y2p = Math.min(y2 + (bboxHeight * (paddingPercent + 0.18)), overlay.height);
-
-            // Màu sắc: đỏ nếu fake face, xanh nếu real face
             const isFake = lastName && lastName.includes('FAKE');
             const isPending = lastName && lastName.includes('Đang kiểm tra');
-            const isPausedState = isPaused; // khi đang tạm dừng
-
+            const isPausedState = isPaused;
             let boxColor = 'lime';
             if (isFake) boxColor = 'red';
             else if (isPending) boxColor = 'orange';
-            else if (isPausedState) boxColor = 'cyan'; // màu khác khi tạm dừng
-            
+            else if (isPausedState) boxColor = 'cyan';
             overlayCtx.strokeStyle = boxColor;
-            overlayCtx.lineWidth = isFake ? 4 : 3; // Dày hơn nếu fake
+            overlayCtx.lineWidth = isFake ? 4 : 3;
             overlayCtx.strokeRect(x1p, y1p, x2p - x1p, y2p - y1p);
             overlayCtx.font = isFake ? 'bold 20px Arial' : '18px Arial';
             overlayCtx.fillStyle = boxColor;
-            overlayCtx.fillText(
-                `${lastName} ${(lastConfidence * 100).toFixed(1)}%`,
-                x1p + 4, y1p - 8
-            );
+            overlayCtx.fillText(`${lastName} ${(lastConfidence * 100).toFixed(1)}%`, x1p + 4, y1p - 8);
         }
         requestAnimationFrame(drawOverlay);
     }
-    // Start overlay drawing
+
+    function showConfirmationModal(name, similarity, onConfirm, onCancel) {
+        const simPct = Math.round((similarity || 0) * 100) / 100;
+        let modalEl = document.getElementById('confirm-similarity-modal');
+        if (!modalEl) {
+            modalEl = document.createElement('div');
+            modalEl.id = 'confirm-similarity-modal';
+            modalEl.className = 'modal fade';
+            modalEl.tabIndex = -1;
+            modalEl.innerHTML = `
+                <div class="modal-dialog modal-sm modal-dialog-centered">
+                    <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">Xác nhận danh tính</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <p>Hệ thống nhận dạng: <strong id="confirm-name"></strong></p>
+                        <p>Độ tương đồng: <strong id="confirm-sim"></strong></p>
+                        <p>Bạn có chắc đó là người này không?</p>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" id="confirm-no">Không</button>
+                        <button type="button" class="btn btn-primary" id="confirm-yes">Có</button>
+                    </div>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modalEl);
+
+            modalEl.querySelector('#confirm-yes').addEventListener('click', () => {
+                const bs = modalEl._bsModalInstance;
+                if (bs) bs.hide();
+                if (typeof onConfirm === 'function') onConfirm();
+            });
+            modalEl.querySelector('#confirm-no').addEventListener('click', () => {
+                const bs = modalEl._bsModalInstance;
+                if (bs) bs.hide();
+                if (typeof onCancel === 'function') onCancel();
+            });
+
+            modalEl.addEventListener('hidden.bs.modal', () => {
+                resumeDetection();
+            });
+        }
+
+        const nameEl = modalEl.querySelector('#confirm-name');
+        const simEl = modalEl.querySelector('#confirm-sim');
+        if (nameEl) nameEl.textContent = name || 'Unknown';
+        if (simEl) simEl.textContent = `${Math.round((similarity || 0) * 100)}%`;
+
+        if (window.bootstrap && typeof window.bootstrap.Modal === 'function') {
+            if (!modalEl._bsModalInstance) modalEl._bsModalInstance = new bootstrap.Modal(modalEl, { backdrop: 'static', keyboard: false });
+            modalEl._bsModalInstance.show();
+        } else {
+            const ok = window.confirm(`Xác nhận: ${name}\nĐộ tương đồng: ${Math.round((similarity||0)*100)}%\n\nCó chắc đây là người này không?`);
+            if (ok) {
+                if (typeof onConfirm === 'function') onConfirm();
+            } else {
+                if (typeof onCancel === 'function') onCancel();
+            }
+            resumeDetection();
+        }
+    }
+
     requestAnimationFrame(drawOverlay);
-    
-    
-    // // // When modal is hidden, resume capturing
-    // // document.getElementById('successModal').addEventListener('hidden.bs.modal', function() {
-    // //     if (!captureInterval) {
-    // //         document.getElementById('restart-scan-btn').classList.remove('d-none');
-    // //     }
-    // // });
-    
 });

@@ -1,4 +1,4 @@
-from flask import Flask, render_template, url_for, jsonify, request
+from flask import Flask, render_template, url_for, jsonify, request, flash, redirect
 import sys
 import os
 import time
@@ -14,6 +14,10 @@ import hashlib
 import warnings
 import onnxruntime as ort
 from collections import deque
+import time
+
+last_frame_time = None  
+FRAME_TIMEOUT = 2.0  # giây
 
 # ===== Temporal gate state (5-frame window) =====
 WINDOW_N = 5
@@ -24,7 +28,7 @@ size_buf   = deque(maxlen=WINDOW_N)
 prev_face_gray = None
 
 # Thêm ngưỡng motion (bạn có thể tinh chỉnh)
-MOTION_THR = 10.0    # ngưỡng chuyển động (tune theo camera)
+MOTION_THR = 6.0    # ngưỡng chuyển động (tune theo camera)
 
 # ================== Anti-spoof (ONNX) ==================
 onnx_path = "/home/coder/trong/computer_vision/face_auth_system/version2/trained_models/face_anti_spoofing/weights/antispoof_80x80.onnx"
@@ -182,7 +186,7 @@ DRAW_LAND = True
 DET_PATH = "/home/coder/trong/computer_vision/face_auth_system/version2/trained_models/detection/det_10g.onnx"
 EMB_PATH      = "/home/coder/trong/computer_vision/face_auth_system/version2/trained_models/recognition/w600k_r50.onnx"
 TEMPLATES_NPZ = "/home/coder/trong/computer_vision/face_auth_system/version2/trained_models/artifacts/templates.npz"
-THRESH        = 0.58
+THRESH        = 0.40  # cosine similarity threshold để nhận diện
 
 # GPU Configuration
 USE_GPU = os.environ.get('USE_GPU', '1') == '1'
@@ -291,7 +295,8 @@ def recognize_face(img, kpss):
 
 # ================== Flask ==================
 app = Flask(__name__)
-
+# Secret key needed for flashing messages
+app.secret_key = os.environ.get('FLASK_SECRET', 'change-me-in-production')
 from collections import OrderedDict
 class SimpleCache:
     def __init__(self, maxsize=100):
@@ -322,14 +327,16 @@ def index():
 def checkin():
     return render_template('checkin.html')
 
-@app.route('/login', methods=['POST'])
-def login():
+@app.route('/manage', methods=['POST'])
+def manage():
     username = request.form.get('username')
     password = request.form.get('password')
-    if username and password:
-        return render_template('checkin.html')
+    if username == 'admin' and password == 'admin':
+        return render_template('manage.html')
     else:
-        return render_template('index.html')
+        # Use flash so the index template can show an alert (index.html already handles flashed messages)
+        flash('Tên đăng nhập hoặc mật khẩu không đúng', 'danger')
+        return redirect(url_for('index'))
 
 @app.route('/face_detect', methods=['POST'])
 def face_detect():
@@ -346,13 +353,26 @@ def face_detect():
 
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    global prev_face_gray
+    global last_frame_time
+    current_time = time.time()
+
+    if last_frame_time is not None:
+        delta_t = current_time - last_frame_time
+        if delta_t > FRAME_TIMEOUT:
+            # reset các buffer nếu ngắt quãng quá lâu
+            real_buf.clear()
+            motion_buf.clear()
+            blur_buf.clear()
+            size_buf.clear()
+            prev_face_gray = None
+            print(f"[RESET] Frame gap {delta_t:.2f}s > {FRAME_TIMEOUT}s → buffers cleared.")
+    last_frame_time = current_time
 
     if img is None:
         result = {'success': False, 'message': 'Invalid image'}
         result_cache.set(img_hash, result)
         return jsonify(result), 400
-    
-    global prev_face_gray
 
     # Detect 1 face
     bboxes, kpss = detect_faces(img)
