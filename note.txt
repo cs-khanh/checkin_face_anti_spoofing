@@ -1,0 +1,3 @@
+LIVE_THRESHOLD = 0.50        # ngưỡng quyết định live/spoof (tune theo data)
+MIN_FACE_SIZE  = 120         # mặt nhỏ hơn cạnh ngắn này coi là kém chất lượng
+BLUR_VAR_THR   = 8.0        # var Laplacian < 20 coi là mờ (tune theo camera)

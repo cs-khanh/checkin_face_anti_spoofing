@@ -1,3 +1,4 @@
+from pathlib import Path
 import numpy as np
 from insightface.model_zoo import get_model
 import cv2
@@ -64,6 +65,20 @@ def save_templates(names, embs, npz_path="artifacts/templates.npz"):
              meta={"model_id":"arcface_w600k_r50","align":"5pt_112"})
     print(f"[saved] {npz_path}  identities={len(names)}")
 
+path_root = Path("/home/coder/trong/computer_vision/face_auth_system/version2/employees/data_face")
+
+def iter_employee_images(root: Path, name_emp):
+    items = []
+    subdirs = [d for d in root.iterdir() if d.is_dir()]
+    if len(subdirs) > 0:
+        # Kiểu A: folder theo tên người
+        for d in sorted(subdirs):
+            if d.name == name_emp:
+                for ext in ("*.jpg","*.jpeg","*.png","*.bmp","*.webp"):
+                    for p in d.glob(ext):
+                        items.append(p)
+    return items
+
 # ======= enroll (thêm nhân viên mới) không cần train lại =======
 def enroll_new_person(person_name, aligned_images, templates_npz="artifacts/templates.npz", min_imgs=1):
     """
@@ -72,7 +87,7 @@ def enroll_new_person(person_name, aligned_images, templates_npz="artifacts/temp
     """
     vecs = []
     for p in aligned_images:
-        img = cv2.imread(p)
+        img = cv2.imread(str(p))
         if img is None: 
             print(f"[skip] cannot read {p}"); 
             continue
@@ -105,10 +120,12 @@ if __name__ == "__main__":
     print("rec_model type:", type(rec_model))
     print("has .prepare?", hasattr(rec_model, "prepare"))
     print("has .get?", hasattr(rec_model, "get"))
-    if hasattr(rec_model, "get"):
-        try:
-            print("get signature:", inspect.signature(rec_model.get))
-        except Exception as e:
-            print("cannot read signature:", e)
-    os.makedirs("artifacts", exist_ok=True)
-    build_templates()
+    # if hasattr(rec_model, "get"):
+    #     try:
+    #         print("get signature:", inspect.signature(rec_model.get))
+    #     except Exception as e:
+    #         print("cannot read signature:", e)
+    # os.makedirs("artifacts", exist_ok=True)
+    # build_templates()
+    # Example enroll:
+    print(enroll_new_person("NV03_NguyenThanhTrong", iter_employee_images(path_root, "NV03_thanhtronggg"), min_imgs=30))

@@ -13,10 +13,18 @@ from functools import lru_cache
 import hashlib
 import warnings
 import onnxruntime as ort
-# from trained_models.face_anti_spoofing.src.anti_spoof_predict import AntiSpoofPredict
+from collections import deque
 
-# anti = AntiSpoofPredict(device_id=0)
-# model_path = '/home/coder/trong/computer_vision/face_auth_system/version2/trained_models/face_anti_spoofing/weights/2.7_80x80_MiniFASNetV2.pth'
+# ===== Temporal gate state (5-frame window) =====
+WINDOW_N = 5
+real_buf   = deque(maxlen=WINDOW_N)
+motion_buf = deque(maxlen=WINDOW_N)
+blur_buf   = deque(maxlen=WINDOW_N)
+size_buf   = deque(maxlen=WINDOW_N)
+prev_face_gray = None
+
+# Thêm ngưỡng motion (bạn có thể tinh chỉnh)
+MOTION_THR = 10.0    # ngưỡng chuyển động (tune theo camera)
 
 # ================== Anti-spoof (ONNX) ==================
 onnx_path = "/home/coder/trong/computer_vision/face_auth_system/version2/trained_models/face_anti_spoofing/weights/antispoof_80x80.onnx"
@@ -26,19 +34,127 @@ sess = ort.InferenceSession(onnx_path, providers=['CUDAExecutionProvider','CPUEx
 
 LIVE_THRESHOLD = 0.50        # ngưỡng quyết định live/spoof (tune theo data)
 MIN_FACE_SIZE  = 120         # mặt nhỏ hơn cạnh ngắn này coi là kém chất lượng
-BLUR_VAR_THR   = 20.0        # var Laplacian < 20 coi là mờ (tune theo camera)
+BLUR_VAR_THR   = 250.0        # var Laplacian < BLUR_VAR_THR coi là mờ (tune theo camera)
+ENABLE_SHARPEN = True
 
-# def predict_pth(img):
-#     img = cv2.resize(img, (80,80))
-#     score = anti.predict(img, model_path)[0]
-#     print("Score: ", score)
-#     real_prob = float(score[1])
-#     printt = float(score[0])
-#     replay = float(score[2])
-#     return real_prob, printt, replay
+def enhance_face_auto(
+    face_bgr,
+    denoise_strength=8,         # 5–10: khử noise nhẹ
+    clahe_clip=2.0, clahe_grid=8,
+    usm_sigma=1.2,              # radius sharpen
+    amount_min=0.4, amount_max=1.8,
+    low_thr=15.0, high_thr=80.0,
+    gamma_corr=True
+):
+    """
+    Smart enhancer:
+    1️⃣  Bilateral denoise giữ chi tiết
+    2️⃣  Auto exposure (gamma correction)
+    3️⃣  CLAHE + Unsharp Mask (adaptive amount)
+    """
+    # --- Step 1: Denoise nhẹ (Bilateral) ---
+    img_dn = cv2.bilateralFilter(face_bgr, d=0,
+                                 sigmaColor=denoise_strength,
+                                 sigmaSpace=denoise_strength)
+
+    # --- Step 2: Auto exposure (Gamma correction) ---
+    if gamma_corr:
+        ycc = cv2.cvtColor(img_dn, cv2.COLOR_BGR2YCrCb)
+        y = ycc[:, :, 0]
+        meanY = np.mean(y)
+        gamma = np.interp(meanY, [50, 180], [1.4, 0.7])  # tối -> tăng sáng
+        gamma = np.clip(gamma, 0.6, 1.8)
+        table = np.array([(i / 255.0) ** (1.0 / gamma) * 255
+                          for i in np.arange(256)]).astype("uint8")
+        img_gamma = cv2.LUT(img_dn, table)
+    else:
+        img_gamma = img_dn
+
+    # --- Step 3: CLAHE + Unsharp Mask ---
+    ycc = cv2.cvtColor(img_gamma, cv2.COLOR_BGR2YCrCb)
+    y = ycc[:, :, 0]
+    lapv0 = cv2.Laplacian(y, cv2.CV_64F).var()
+
+    clahe = cv2.createCLAHE(clipLimit=clahe_clip,
+                            tileGridSize=(clahe_grid, clahe_grid))
+    y_eq = clahe.apply(y)
+
+    amount = np.interp(lapv0, [low_thr, high_thr],
+                       [amount_max, amount_min])
+    amount = float(np.clip(amount, amount_min, amount_max))
+
+    blur = cv2.GaussianBlur(y_eq, (0, 0), usm_sigma)
+    detail = cv2.subtract(y_eq, blur)
+    y_sharp = cv2.addWeighted(y_eq, 1.0, detail, amount, 0)
+
+    ycc[:, :, 0] = np.clip(y_sharp, 0, 255).astype(np.uint8)
+    sharp_bgr = cv2.cvtColor(ycc, cv2.COLOR_YCrCb2BGR)
+
+    # --- Thống kê debug ---
+    y2 = cv2.cvtColor(sharp_bgr, cv2.COLOR_BGR2YCrCb)[:, :, 0]
+    lapv1 = cv2.Laplacian(y2, cv2.CV_64F).var()
+    meanY2 = np.mean(y2)
+    meta = {
+        "lapv_before": float(lapv0),
+        "lapv_after": float(lapv1),
+        "amount": amount,
+        "gamma": gamma,
+        "meanY": meanY,
+        "meanY_after": meanY2
+    }
+    return sharp_bgr, meta
+
+def sharpen_face_auto(face_bgr,
+                      clahe_clip=2.0, clahe_grid=8,
+                      usm_sigma=1.2, amount_min=0.4, amount_max=1.8,
+                      low_thr=15.0, high_thr=80.0):
+    """
+    Sharpen theo pipeline: YCrCb(Y) + CLAHE -> Unsharp Mask (USM),
+    với 'amount' tự động dựa trên Laplacian variance ban đầu.
+    Trả về: (face_bgr_sharp, meta_dict)
+    """
+    # --- đo độ nét ban đầu trên Y ---
+    ycc = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2YCrCb)
+    y = ycc[:, :, 0]
+    lapv0 = cv2.Laplacian(y, cv2.CV_64F).var()
+
+    # --- CLAHE để tăng tương phản cục bộ, giúp cạnh rõ hơn ---
+    clahe = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=(clahe_grid, clahe_grid))
+    y_eq = clahe.apply(y)
+
+    # --- Unsharp Mask (USM) ---
+    # amount tự động: ảnh càng mờ (lapv thấp) -> amount càng cao
+    amount = np.interp(lapv0, [low_thr, high_thr], [amount_max, amount_min])
+    amount = float(np.clip(amount, amount_min, amount_max))
+
+    # Làm mờ nhẹ để lấy phần chi tiết
+    blur = cv2.GaussianBlur(y_eq, (0, 0), usm_sigma)
+    detail = cv2.subtract(y_eq, blur)              # detail = y_eq - blur
+    y_sharp = cv2.addWeighted(y_eq, 1.0, detail, amount, 0)  # y_eq + amount*detail
+
+    # Gộp lại BGR
+    ycc[:, :, 0] = np.clip(y_sharp, 0, 255).astype(np.uint8)
+    sharp_bgr = cv2.cvtColor(ycc, cv2.COLOR_YCrCb2BGR)
+
+    # --- đo lại lapv sau sharpen (để log/so sánh) ---
+    y2 = cv2.cvtColor(sharp_bgr, cv2.COLOR_BGR2YCrCb)[:, :, 0]
+    lapv1 = cv2.Laplacian(y2, cv2.CV_64F).var()
+
+    meta = {
+        "lapv_before": float(lapv0),
+        "lapv_after":  float(lapv1),
+        "amount":      amount
+    }
+    return sharp_bgr, meta
+
 def _lap_var(gray):
-    gray = cv2.GaussianBlur(gray, (3,3), 0)
+    #gray = cv2.GaussianBlur(gray, (3,3), 0)
     return cv2.Laplacian(gray, cv2.CV_64F).var()
+def improved_lap_var(face_bgr):
+    y = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2YCrCb)[:,:,0]
+    y = cv2.GaussianBlur(y, (3,3), 0)
+    lapv = cv2.Laplacian(y, cv2.CV_64F).var()
+    return lapv
 
 def preprocess_bgr_to_nchw01(img_bgr, size=(80,80)):
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)  # repo dùng RGB
@@ -107,7 +223,7 @@ except Exception as e:
 detection_lock   = Lock()
 recognition_lock = Lock()
 faiss_lock       = Lock()
-anti_lock        = Lock()   # ✅ anti-spoof lock
+anti_lock        = Lock() 
 
 def load_templates(npz_path):
     d = np.load(npz_path, allow_pickle=True)
@@ -131,6 +247,7 @@ faiss_index = faiss.IndexFlatIP(embs.shape[1])
 print(embs.shape)
 faiss_index.add(embs)
 print(f"[GALLERY] identities={len(names)}  dim={embs.shape[1] if embs.size else 0}")
+print(f"[Start App] Face Recognition ✅")
 
 # ========= UTILS =========
 def l2n(v):
@@ -234,12 +351,22 @@ def face_detect():
         result = {'success': False, 'message': 'Invalid image'}
         result_cache.set(img_hash, result)
         return jsonify(result), 400
+    
+    global prev_face_gray
 
     # Detect 1 face
     bboxes, kpss = detect_faces(img)
     if len(bboxes) == 0:
         result = {'success': False, 'message': 'No faces detected'}
         result_cache.set(img_hash, result)
+
+        # reset khi mất mặt
+        real_buf.clear()
+        motion_buf.clear()
+        blur_buf.clear()
+        size_buf.clear()
+        prev_face_gray = None
+        print("[RESET] No face detected → buffers cleared.")
         return jsonify(result), 200
 
     bbox = bboxes[0]
@@ -250,7 +377,7 @@ def face_detect():
         return jsonify(result), 200
 
     # === Crop mặt (pad nhẹ) ===
-    pad = 20
+    pad = 50
     H, W = img.shape[:2]
     x1p = max(0, x1 - pad); y1p = max(0, y1 - pad)
     x2p = min(W, x2 + pad); y2p = min(H, y2 + pad)
@@ -258,37 +385,60 @@ def face_detect():
 
     # === Quality gate (kích thước & độ nét) ===
     min_side = min(face_crop.shape[:2]) if face_crop.size else 0
-    if min_side < MIN_FACE_SIZE:
-        is_real = False
-        spoof_confidence = 1.0
+    #gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
+    #lapv = _lap_var(gray)
+    #lapv = improved_lap_var(face_crop)
+    # === Smart enhance: denoise + auto exposure + sharpen ===
+    # face_crop_enh, enh = enhance_face_auto(face_crop)
+    # print(f"[ENH] LapVar {enh['lapv_before']:.1f}→{enh['lapv_after']:.1f} "
+    #     f"gamma={enh['gamma']:.2f} amount={enh['amount']:.2f} "
+    #     f"meanY {enh['meanY']:.1f}→{enh['meanY_after']:.1f}")
+
+    # # Dùng ảnh đã enhance cho blur/motion/anti-spoof
+    # gray = cv2.cvtColor(face_crop_enh, cv2.COLOR_BGR2GRAY)
+    # lapv = _lap_var(gray)
+
+    if ENABLE_SHARPEN:
+        face_crop_proc, shp = sharpen_face_auto(face_crop)
+        print(f"[SHARP] {shp}")
     else:
-        gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
-        if _lap_var(gray) < BLUR_VAR_THR:
-            is_real = False
-            spoof_confidence = 1.0
-        else:
-            # === Anti-spoof ONNX ===
-            with anti_lock:
-                real_prob, prob_print, prob_replay = predict_anti_spoof_facecrop(face_crop)
-                print("=== Anti-spoofing Results ===")
-                print(f"Anti-spoof scores - real: {real_prob:.4f}, print: {prob_print:.4f}, replay: {prob_replay:.4f}")
-                print("=============================")
-            is_real = bool(real_prob >= LIVE_THRESHOLD)
-            # spoof_confidence = max(prob_print, prob_replay)  # nếu muốn hiểu là “xác suất tấn công”
-            spoof_confidence = float(1.0 - real_prob)          # tổng các lớp spoof
-    # with anti_lock:
-    #     real_prob, prob_print, prob_replay = predict_anti_spoof_facecrop(face_crop)
-    #     print("=== Anti-spoofing Results ===")
-    #     print(f"Anti-spoof scores - real: {real_prob:.4f}, print: {prob_print:.4f}, replay: {prob_replay:.4f}")
-    #     print("=============================")
-    # is_real = bool(real_prob >= LIVE_THRESHOLD)
-    # # spoof_confidence = max(prob_print, prob_replay)  # nếu muốn hiểu là “xác suất tấn công”
-    # spoof_confidence = float(1.0 - real_prob)          # tổng các lớp spoof
-    # Nếu spoof -> có thể trả thẳng, không nhận diện
-    if not is_real:
+        face_crop_proc = face_crop
+
+    gray = cv2.cvtColor(face_crop_proc, cv2.COLOR_BGR2GRAY)
+    lapv = _lap_var(gray)
+
+    motion_score = 0.0
+    if prev_face_gray is not None:
+        h = min(prev_face_gray.shape[0], gray.shape[0])
+        w = min(prev_face_gray.shape[1], gray.shape[1])
+        diff = cv2.absdiff(cv2.resize(prev_face_gray, (w, h)),
+                        cv2.resize(gray, (w, h)))
+        motion_score = float(np.mean(diff))
+    prev_face_gray = gray.copy()
+
+    # Nếu crop invalid
+    if min_side <= 0:
+        result = {'success': False, 'message': 'Invalid face crop'}
+        result_cache.set(img_hash, result)
+        return jsonify(result), 200
+
+    # === 2) Anti-spoof (real_prob) cho frame hiện tại ===
+    with anti_lock:
+        real_prob, prob_print, prob_replay = predict_anti_spoof_facecrop(face_crop)
+    print(f"[FRAME {len(real_buf)}] size={min_side}px  blur={lapv:.2f}  motion={motion_score:.2f}  real={real_prob:.3f}")
+
+    # === 3) Đưa vào buffer 5-frame ===
+    size_buf.append(min_side)
+    blur_buf.append(lapv)
+    motion_buf.append(motion_score)
+    real_buf.append(real_prob)
+    # === 4) Nếu chưa đủ 5 frame → pending ===
+    if len(real_buf) < WINDOW_N:
+        print(f"[PENDING] collected {len(real_buf)}/{WINDOW_N} frames")
+        # Có thể trả về trạng thái pending cho UI
         result = {
             'success': True,
-            'message': 'Face detected (spoofed)',
+            'message': f'Pending {len(real_buf)}/{WINDOW_N} frames',
             'faces_count': 1,
             'bbox': [x1, y1, x2, y2],
             'confidence': conf_det,
@@ -297,12 +447,84 @@ def face_detect():
             'similarity': 0.0,
             'department': None,
             'is_real': False,
-            'spoof_score': spoof_confidence
+            'spoof_score': 1.0,              # tạm thời coi là spoof trong lúc chờ
+            'pending': True,
+            'window': len(real_buf)
         }
         result_cache.set(img_hash, result)
         return jsonify(result), 200
+    # === 5) Khi đã đủ 5 frame → tính thống kê cửa sổ ===
+    min_face5   = int(np.min(size_buf))
+    avg_blur5   = float(np.median(blur_buf))
+    avg_motion5 = float(np.mean(motion_buf))
+    avg_real5   = float(np.mean(real_buf))
+    print(f"[WINDOW-5] min_face={min_face5}px  blur~={avg_blur5:.2f}  motion~={avg_motion5:.2f}  real~={avg_real5:.3f}")
 
-    # === Recognition khi đã pass anti-spoof ===
+    # === 6) GATE tuần tự: size → motion → blur → real ===
+    fail_reason = None
+    is_real = False
+    spoof_confidence = float(1.0 - avg_real5)
+
+    # GATE 1: kích thước khuôn mặt
+    if min_face5 < MIN_FACE_SIZE:
+        fail_reason = f"Face too small ({min_face5}px < {MIN_FACE_SIZE})"
+        print(f"[GATE FAIL] {fail_reason}")
+
+    # GATE 2: chuyển động khuôn mặt
+    elif avg_motion5 < MOTION_THR:
+        fail_reason = f"Low motion ({avg_motion5:.2f} < {MOTION_THR})"
+        print(f"[GATE FAIL] {fail_reason}")
+
+    # GATE 3: độ nét khuôn mặt
+    elif avg_blur5 < BLUR_VAR_THR:
+        fail_reason = f"Image too blurry (LapVar {avg_blur5:.2f} < {BLUR_VAR_THR})"
+        print(f"[GATE FAIL] {fail_reason}")
+
+    # GATE 4: xác suất model real
+    elif avg_real5 < LIVE_THRESHOLD:
+        fail_reason = f"Low live probability ({avg_real5:.3f} < {LIVE_THRESHOLD})"
+        print(f"[GATE FAIL] {fail_reason}")
+
+    # Nếu qua hết 4 gate
+    else:
+        is_real = True
+        print("[GATE PASS ✅] Face passed all 4 gates (size→motion→blur→real).")
+
+    # === 7) Ra quyết định và reset buffer ===
+    if not is_real:
+        result = {
+            'success': True,
+            'message': f'Face spoofed ({fail_reason})',
+            'faces_count': 1,
+            'bbox': [x1, y1, x2, y2],
+            'confidence': conf_det,
+            'employee_id': None,
+            'employee_name': 'unknown',
+            'similarity': 0.0,
+            'department': None,
+            'is_real': False,
+            'spoof_score': 1.0,
+            'fail_reason': fail_reason,
+            'pending': False,
+            'window_stats': {
+                'min_face': min_face5,
+                'avg_blur': avg_blur5,
+                'avg_motion': avg_motion5,
+                'avg_real': avg_real5
+            }
+        }
+        result_cache.set(img_hash, result)
+        # Reset sau khi ra quyết định
+        real_buf.clear()
+        motion_buf.clear()
+        blur_buf.clear()
+        size_buf.clear()
+        prev_face_gray = None
+        print("[RESET] Cleared 5-frame buffers after FAIL decision.")
+        print("[FAILURE] Returning spoofed result.")
+        print("=============================================")
+        return jsonify(result), 200
+    # === Recognition khi đã pass anti-spoof window-5 ===
     label, best_sim, best_idx, top = recognize_face(img, kpss)
 
     result = {
@@ -317,10 +539,90 @@ def face_detect():
         'department': 'Kỹ thuật',
         'is_real': is_real,
         'spoof_score': float(spoof_confidence),
+        'pending': False,
+        'window_stats': {
+            'min_face': min_face5,
+            'avg_blur': avg_blur5,
+            'avg_motion': avg_motion5,
+            'avg_real': avg_real5
+        }
     }
-
     result_cache.set(img_hash, result)
+    real_buf.clear()
+    motion_buf.clear()
+    blur_buf.clear()
+    size_buf.clear()
+    prev_face_gray = None
+    print("[RESET] Cleared 5-frame buffers after decision.")
     return jsonify(result), 200
+
+    # if min_side < MIN_FACE_SIZE:
+    #     is_real = False
+    #     spoof_confidence = 1.0
+    #     print(f"Face too small: {min_side}px")
+    # else:
+        
+    #     if _lap_var(gray) < BLUR_VAR_THR:
+    #         is_real = False
+    #         spoof_confidence = 1.0
+    #         print(f"Face too blurry: varLaplacian={_lap_var(gray):.2f}")
+    #     else:
+    #         # === Anti-spoof ONNX ===
+    #         with anti_lock:
+    #             real_prob, prob_print, prob_replay = predict_anti_spoof_facecrop(face_crop)
+    #             print("=== Anti-spoofing Results ===")
+    #             print(f"Anti-spoof scores - real: {real_prob:.4f}, print: {prob_print:.4f}, replay: {prob_replay:.4f}")
+    #             print("=============================")
+    #         is_real = bool(real_prob >= LIVE_THRESHOLD)
+    #         # spoof_confidence = max(prob_print, prob_replay)  # nếu muốn hiểu là “xác suất tấn công”
+    #         spoof_confidence = float(1.0 - real_prob)          # tổng các lớp spoof
+
+    # print(f"Is real: {is_real}, spoof score: {spoof_confidence:.4f}, gray varLaplacian: {_lap_var(gray):.2f}")
+    # with anti_lock:
+    #     real_prob, prob_print, prob_replay = predict_anti_spoof_facecrop(face_crop)
+    #     print("=== Anti-spoofing Results ===")
+    #     print(f"Anti-spoof scores - real: {real_prob:.4f}, print: {prob_print:.4f}, replay: {prob_replay:.4f}")
+    #     print("=============================")
+    # is_real = bool(real_prob >= LIVE_THRESHOLD)
+    # # spoof_confidence = max(prob_print, prob_replay)  # nếu muốn hiểu là “xác suất tấn công”
+    # spoof_confidence = float(1.0 - real_prob)          # tổng các lớp spoof
+    # Nếu spoof -> có thể trả thẳng, không nhận diện
+    # if not is_real:
+    #     result = {
+    #         'success': True,
+    #         'message': 'Face detected (spoofed)',
+    #         'faces_count': 1,
+    #         'bbox': [x1, y1, x2, y2],
+    #         'confidence': conf_det,
+    #         'employee_id': None,
+    #         'employee_name': 'unknown',
+    #         'similarity': 0.0,
+    #         'department': None,
+    #         'is_real': False,
+    #         'spoof_score': spoof_confidence
+    #     }
+    #     result_cache.set(img_hash, result)
+    #     return jsonify(result), 200
+
+    # # === Recognition khi đã pass anti-spoof ===
+    # label, best_sim, best_idx, top = recognize_face(img, kpss)
+
+    # result = {
+    #     'success': True,
+    #     'message': 'Face detected successfully',
+    #     'faces_count': 1,
+    #     'bbox': [x1, y1, x2, y2],
+    #     'confidence': conf_det,
+    #     'employee_id': 'NV02',
+    #     'employee_name': label,
+    #     'similarity': best_sim,
+    #     'department': 'Kỹ thuật',
+    #     'is_real': is_real,
+    #     'spoof_score': float(spoof_confidence),
+    # }
+
+    # result_cache.set(img_hash, result)
+    # return jsonify(result), 200
 
 if __name__ == '__main__':
     print("Đang khởi chạy ứng dụng Flask...")

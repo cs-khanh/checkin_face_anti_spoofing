@@ -31,9 +31,9 @@ document.addEventListener('DOMContentLoaded', function() {
     let lastConfidence = null;
     let detectionTimeout = null;
     let lastFrameData = null;
-    const motionThreshold = 0.03; // 3% thay đổi pixel (nhạy hơn)
+    const motionThreshold = 0.01; // 1% thay đổi pixel (nhạy hơn)
     let isProcessing = false; // Flag để tránh gọi API trùng lặp
-    
+    let isPaused = false; // trạng thái tạm dừng 3s
     // Update clock
     function updateClock() {
         const now = new Date();
@@ -66,8 +66,8 @@ document.addEventListener('DOMContentLoaded', function() {
         try {
             const constraints = {
                 video: {
-                    width: { ideal: 480 },  // Giảm từ 640 -> 480 để faster
-                    height: { ideal: 480 },
+                    width: { ideal: 640 },
+                    height: { ideal: 640 },
                     facingMode: "user"
                 }
             };
@@ -172,7 +172,9 @@ document.addEventListener('DOMContentLoaded', function() {
         if (isProcessing) {
             return;
         }
-        
+        if(isPaused) {
+            return;
+        }
         // Kiểm tra motion trước
         const hasMotion = calculateMotion();
         
@@ -195,7 +197,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // Convert to blob và gửi lên server
         canvasCapture.toBlob(function(blob) {
             detectionFace(blob);
-        }, 'image/jpeg', 0.75); // Giảm quality xuống 0.75 để nhanh hơn (balance quality/speed)
+        }, 'image/jpeg', 0.9); // Giảm quality xuống 0.75 để nhanh hơn (balance quality/speed)
     }
     
     // // // Start face detection process
@@ -203,13 +205,14 @@ document.addEventListener('DOMContentLoaded', function() {
             function detectLoop() {
                 captureFrame();
                 // Sử dụng requestAnimationFrame để smooth hơn, fallback setTimeout
-                detectionTimeout = setTimeout(detectLoop, 33); // 33ms = ~30 FPS (real-time)
+                detectionTimeout = setTimeout(detectLoop, 50); 
             }
             detectLoop();
     }
 
     // Send the frame to the backend for face detection
     function detectionFace(blob) {
+        if (isPaused) return; // 🚫 nếu đang tạm dừng thì không gửi frame mới
         isProcessing = true;
         
         const formData = new FormData();
@@ -220,35 +223,64 @@ document.addEventListener('DOMContentLoaded', function() {
         })
         .then(response => response.json())
         .then(data => {
-            // Check for spoofing detection
-            if (data.is_real === false || data.warning) {
-                // Spoofing detected!
+            if (data.pending === true) {
                 lastBbox = data.bbox || null;
-                lastName = '⚠️ FAKE FACE!';
+                lastName = '⏳ Đang kiểm tra...';
                 lastConfidence = 0;
-                
-                // Show warning message
+
                 infoMessage.innerHTML = `
-                    <i class="bi bi-exclamation-triangle"></i>
-                    <span>${data.warning || 'Phát hiện giả mạo! Vui lòng dùng khuôn mặt thật.'}</span>
-                    <small class="d-block mt-1">Spoof Score: ${(data.spoof_score * 100).toFixed(1)}%</small>
+                    <i class="bi bi-hourglass-split"></i>
+                    <span>Đang kiểm tra khuôn mặt (${data.window}/5 khung hình)...</span>
                 `;
-                infoMessage.className = 'alert alert-danger';
-            } else if (data.success && data.bbox && data.confidence > 0.6) {
-                // Valid real face
-                lastBbox = data.bbox;
-                lastName = data.employee_name ?? 'Unknown';
-                lastConfidence = data.similarity;
-                
-                // Clear warning if any
-                if (infoMessage.classList.contains('alert-danger')) {
+                infoMessage.className = 'alert alert-warning';
+                return; // Chưa ra kết quả cuối, chỉ hiển thị tạm thời
+            }
+            if (data.success && !data.pending) {
+                isPaused = true;
+                videoElement.pause();
+
+                // Check for spoofing detection
+                if (data.is_real === false || data.warning) {
+                    // Spoofing detected!
+                    console.log(data.fail_reason);
+                    lastBbox = data.bbox || null;
+                    lastName = '⚠️ FAKE FACE!';
+                    lastConfidence = 0;
+                    
+                    // Show warning message
+                    infoMessage.innerHTML = `
+                        <i class="bi bi-exclamation-triangle"></i>
+                        <span>${data.warning || 'Phát hiện giả mạo! Vui lòng dùng khuôn mặt thật.'}</span>
+                        <small class="d-block mt-1">Spoof Score: ${(data.spoof_score * 100).toFixed(1)}%</small>
+                    `;
+                    infoMessage.className = 'alert alert-danger';
+                } else if (data.success && data.bbox && data.confidence > 0.6) {
+                    // Valid real face
+                    lastBbox = data.bbox;
+                    lastName = data.employee_name ?? 'Unknown';
+                    lastConfidence = data.similarity;
+                    
+                    // Clear warning if any
+                    if (infoMessage.classList.contains('alert-danger')) {
+                        infoMessage.innerHTML = '';
+                        infoMessage.className = '';
+                    }
+
+                } else {
+                    lastBbox = null;
+                    lastName = null;
+                    lastConfidence = null;
+                }
+                setTimeout(() => {
+                    videoElement.play();
+                    isPaused = false;
                     infoMessage.innerHTML = '';
                     infoMessage.className = '';
-                }
-            } else {
-                lastBbox = null;
-                lastName = null;
-                lastConfidence = null;
+                }, 1000);
+            }else {
+                    lastBbox = null;
+                    lastName = null;
+                    lastConfidence = null;
             }
         })
         .catch(error => {
@@ -276,19 +308,25 @@ document.addEventListener('DOMContentLoaded', function() {
             const [x1, y1, x2, y2] = lastBbox.map(v => Math.round(v));
             const bboxWidth = x2 - x1;
             const bboxHeight = y2 - y1;
-            const paddingPercent = 0.1; // 10%
+            const paddingPercent = 0.2; // 20%
             const paddingX = bboxWidth * paddingPercent;
             const paddingY = bboxHeight * paddingPercent;
 
             // Mở rộng khung ra ngoài
             const x1p = Math.max(x1 - paddingX, 0);
-            const y1p = Math.max(y1 - (bboxHeight * (paddingPercent + 0.2)), 0);
+            const y1p = Math.max(y1 - (bboxHeight * (paddingPercent + 0.15)), 0);
             const x2p = Math.min(x2 + paddingX, overlay.width);
-            const y2p = Math.min(y2 + (bboxHeight * (paddingPercent + 0.23)), overlay.height);
+            const y2p = Math.min(y2 + (bboxHeight * (paddingPercent + 0.18)), overlay.height);
 
             // Màu sắc: đỏ nếu fake face, xanh nếu real face
             const isFake = lastName && lastName.includes('FAKE');
-            const boxColor = isFake ? 'red' : 'lime';
+            const isPending = lastName && lastName.includes('Đang kiểm tra');
+            const isPausedState = isPaused; // khi đang tạm dừng
+
+            let boxColor = 'lime';
+            if (isFake) boxColor = 'red';
+            else if (isPending) boxColor = 'orange';
+            else if (isPausedState) boxColor = 'cyan'; // màu khác khi tạm dừng
             
             overlayCtx.strokeStyle = boxColor;
             overlayCtx.lineWidth = isFake ? 4 : 3; // Dày hơn nếu fake
