@@ -1,4 +1,4 @@
-from flask import Flask, render_template, url_for, jsonify, request, flash, redirect
+from flask import Flask, render_template, url_for, jsonify, request, flash, redirect, session
 import sys
 import os
 import time
@@ -15,6 +15,7 @@ import warnings
 import onnxruntime as ort
 from collections import deque
 import time
+import random
 
 last_frame_time = None  
 FRAME_TIMEOUT = 2.0  # giây
@@ -28,7 +29,7 @@ size_buf   = deque(maxlen=WINDOW_N)
 prev_face_gray = None
 
 # Thêm ngưỡng motion (bạn có thể tinh chỉnh)
-MOTION_THR = 6.0    # ngưỡng chuyển động (tune theo camera)
+MOTION_THR = 2.0    # ngưỡng chuyển động (tune theo camera)
 
 # ================== Anti-spoof (ONNX) ==================
 onnx_path = "/home/coder/trong/computer_vision/face_auth_system/version2/trained_models/face_anti_spoofing/weights/antispoof_80x80.onnx"
@@ -36,9 +37,9 @@ onnx_path = "/home/coder/trong/computer_vision/face_auth_system/version2/trained
 # ONNX session (CUDA -> CPU fallback đã cấu hình bên dưới)
 sess = ort.InferenceSession(onnx_path, providers=['CUDAExecutionProvider','CPUExecutionProvider'])
 
-LIVE_THRESHOLD = 0.50        # ngưỡng quyết định live/spoof (tune theo data)
+LIVE_THRESHOLD = 0.55        # ngưỡng quyết định live/spoof (tune theo data)
 MIN_FACE_SIZE  = 120         # mặt nhỏ hơn cạnh ngắn này coi là kém chất lượng
-BLUR_VAR_THR   = 250.0        # var Laplacian < BLUR_VAR_THR coi là mờ (tune theo camera)
+BLUR_VAR_THR   = 280.0        # var Laplacian < BLUR_VAR_THR coi là mờ (tune theo camera)
 ENABLE_SHARPEN = True
 
 def enhance_face_auto(
@@ -67,7 +68,7 @@ def enhance_face_auto(
         y = ycc[:, :, 0]
         meanY = np.mean(y)
         gamma = np.interp(meanY, [50, 180], [1.4, 0.7])  # tối -> tăng sáng
-        gamma = np.clip(gamma, 0.6, 1.8)
+        gamma = np.clip(gamma, 0.8, 1.4)
         table = np.array([(i / 255.0) ** (1.0 / gamma) * 255
                           for i in np.arange(256)]).astype("uint8")
         img_gamma = cv2.LUT(img_dn, table)
@@ -207,7 +208,22 @@ try:
     scrfd = get_model(DET_PATH, providers=providers)
     scrfd.prepare(ctx_id=ctx_id, input_size=(480,480), det_thresh=0.6, nms=0.5)
 
-    rec_model = ArcFaceONNX(EMB_PATH)
+    # Create an ONNX Runtime session with the requested providers when possible
+    try:
+        available_providers = ort.get_available_providers()
+        providers_used = [p for p in providers if p in available_providers]
+        if not providers_used:
+            providers_used = ['CPUExecutionProvider']
+        rec_session = ort.InferenceSession(EMB_PATH, providers=providers_used)
+    except Exception:
+        # fallback: let ArcFaceONNX create its own session
+        rec_session = None
+
+    # Pass the session into ArcFaceONNX so its __init__ can set input/output attrs
+    if rec_session is not None:
+        rec_model = ArcFaceONNX(EMB_PATH, session=rec_session)
+    else:
+        rec_model = ArcFaceONNX(EMB_PATH)
     rec_model.prepare(ctx_id=ctx_id, input_size=(112,112))
 
     print(f"✅ Models loaded successfully on {providers[0]}")
@@ -219,7 +235,19 @@ except Exception as e:
         ctx_id = -1
         scrfd = get_model(DET_PATH, providers=providers)
         scrfd.prepare(ctx_id=ctx_id, input_size=(480,480), det_thresh=0.65, nms=0.5)
-        rec_model = ArcFaceONNX(EMB_PATH)
+        try:
+            available_providers = ort.get_available_providers()
+            providers_used = [p for p in providers if p in available_providers]
+            if not providers_used:
+                providers_used = ['CPUExecutionProvider']
+            rec_session = ort.InferenceSession(EMB_PATH, providers=providers_used)
+        except Exception:
+            rec_session = None
+
+        if rec_session is not None:
+            rec_model = ArcFaceONNX(EMB_PATH, session=rec_session)
+        else:
+            rec_model = ArcFaceONNX(EMB_PATH)
         rec_model.prepare(ctx_id=ctx_id, input_size=(112,112))
         print("✅ Models loaded on CPU")
 
@@ -319,24 +347,107 @@ class SimpleCache:
 
 result_cache = SimpleCache(maxsize=100)
 
+def generate_captcha():
+    """Tạo một phép toán ngẫu nhiên và trả về (câu hỏi, đáp án)"""
+    num1 = random.randint(1, 100)
+    num2 = random.randint(1, 100)
+    operators = ['+', '-', '*']
+    operator = random.choice(operators)
+    
+    if operator == '+':
+        answer = num1 + num2
+        question = f"{num1} + {num2}"
+    elif operator == '-':
+        answer = num1 - num2
+        question = f"{num1} - {num2}"
+    else:  # '*'
+        answer = num1 * num2
+        question = f"{num1} × {num2}"
+    
+    return question, answer
+
 @app.route('/')
 def index():
-    return render_template('index.html')
+    # Tạo CAPTCHA mới và lưu vào session
+    question, answer = generate_captcha()
+    session['captcha_answer'] = answer
+    return render_template('index.html', captcha_question=question)
+
+@app.route('/refresh_captcha')
+def refresh_captcha():
+    """API để làm mới CAPTCHA"""
+    question, answer = generate_captcha()
+    session['captcha_answer'] = answer
+    return jsonify({'question': question})
 
 @app.route('/checkin')
 def checkin():
     return render_template('checkin.html')
 
-@app.route('/manage', methods=['POST'])
+@app.route('/manage', methods=['GET', 'POST'])
 def manage():
+    if request.method == 'GET':
+        # Kiểm tra xem user đã đăng nhập chưa
+        if session.get('logged_in'):
+            return render_template('manage.html')
+        else:
+            flash('Vui lòng đăng nhập để truy cập trang này.', 'warning')
+            return redirect(url_for('index'))
+    
+    # POST request - xử lý đăng nhập
     username = request.form.get('username')
     password = request.form.get('password')
+    captcha_answer = request.form.get('captcha')
+    
+    # Kiểm tra CAPTCHA trước
+    try:
+        user_answer = int(captcha_answer) if captcha_answer else None
+        correct_answer = session.get('captcha_answer')
+        
+        if user_answer is None or correct_answer is None or user_answer != correct_answer:
+            flash('CAPTCHA không đúng. Vui lòng thử lại.', 'danger')
+            return redirect(url_for('index'))
+    except ValueError:
+        flash('CAPTCHA phải là một số.', 'danger')
+        return redirect(url_for('index'))
+    
+    # Kiểm tra username và password
     if username == 'admin' and password == 'admin':
-        return render_template('manage.html')
+        # Xóa CAPTCHA và đánh dấu đã đăng nhập
+        session.pop('captcha_answer', None)
+        session['logged_in'] = True
+        session['username'] = username
+        # Redirect để tránh form resubmit khi F5
+        return redirect(url_for('home'))
     else:
-        # Use flash so the index template can show an alert (index.html already handles flashed messages)
         flash('Tên đăng nhập hoặc mật khẩu không đúng', 'danger')
         return redirect(url_for('index'))
+
+@app.route('/home')
+def home():
+    """Trang home sau khi đăng nhập"""
+    if not session.get('logged_in'):
+        flash('Vui lòng đăng nhập để truy cập trang này.', 'warning')
+        return redirect(url_for('index'))
+    return render_template('home.html')
+
+@app.route('/logout')
+def logout():
+    """Đăng xuất và xóa session"""
+    session.clear()
+    flash('Đã đăng xuất thành công.', 'success')
+    return redirect(url_for('index'))
+
+@app.route('/monitor')
+def monitor():
+    """Chuyển hướng đến Grafana dashboard"""
+    # Kiểm tra đăng nhập
+    if not session.get('logged_in'):
+        flash('Vui lòng đăng nhập để truy cập trang này.', 'warning')
+        return redirect(url_for('index'))
+    
+    # Redirect trực tiếp đến Grafana
+    return redirect("https://view.csenguyenminhphuc.id.vn/")
 
 @app.route('/face_detect', methods=['POST'])
 def face_detect():
@@ -409,23 +520,23 @@ def face_detect():
     #lapv = _lap_var(gray)
     #lapv = improved_lap_var(face_crop)
     # === Smart enhance: denoise + auto exposure + sharpen ===
-    # face_crop_enh, enh = enhance_face_auto(face_crop)
-    # print(f"[ENH] LapVar {enh['lapv_before']:.1f}→{enh['lapv_after']:.1f} "
-    #     f"gamma={enh['gamma']:.2f} amount={enh['amount']:.2f} "
-    #     f"meanY {enh['meanY']:.1f}→{enh['meanY_after']:.1f}")
+    face_crop_enh, enh = enhance_face_auto(face_crop)
+    print(f"[ENH] LapVar {enh['lapv_before']:.1f}→{enh['lapv_after']:.1f} "
+        f"gamma={enh['gamma']:.2f} amount={enh['amount']:.2f} "
+        f"meanY {enh['meanY']:.1f}→{enh['meanY_after']:.1f}")
 
-    # # Dùng ảnh đã enhance cho blur/motion/anti-spoof
-    # gray = cv2.cvtColor(face_crop_enh, cv2.COLOR_BGR2GRAY)
+    # Dùng ảnh đã enhance cho blur/motion/anti-spoof
+    gray = cv2.cvtColor(face_crop_enh, cv2.COLOR_BGR2GRAY)
+    lapv = enh['lapv_after']
+
+    # if ENABLE_SHARPEN:
+    #     face_crop_proc, shp = sharpen_face_auto(face_crop)
+    #     print(f"[SHARP] {shp}")
+    # else:
+    #     face_crop_proc = face_crop
+
+    # gray = cv2.cvtColor(face_crop_proc, cv2.COLOR_BGR2GRAY)
     # lapv = _lap_var(gray)
-
-    if ENABLE_SHARPEN:
-        face_crop_proc, shp = sharpen_face_auto(face_crop)
-        print(f"[SHARP] {shp}")
-    else:
-        face_crop_proc = face_crop
-
-    gray = cv2.cvtColor(face_crop_proc, cv2.COLOR_BGR2GRAY)
-    lapv = _lap_var(gray)
 
     motion_score = 0.0
     if prev_face_gray is not None:
@@ -433,7 +544,8 @@ def face_detect():
         w = min(prev_face_gray.shape[1], gray.shape[1])
         diff = cv2.absdiff(cv2.resize(prev_face_gray, (w, h)),
                         cv2.resize(gray, (w, h)))
-        motion_score = float(np.mean(diff))
+        motion_score = np.mean(diff) * (gray.shape[0]*gray.shape[1]) / (640*640)
+
     prev_face_gray = gray.copy()
 
     # Nếu crop invalid
@@ -444,7 +556,7 @@ def face_detect():
 
     # === 2) Anti-spoof (real_prob) cho frame hiện tại ===
     with anti_lock:
-        real_prob, prob_print, prob_replay = predict_anti_spoof_facecrop(face_crop)
+        real_prob, prob_print, prob_replay = predict_anti_spoof_facecrop(face_crop_enh)
     print(f"[FRAME {len(real_buf)}] size={min_side}px  blur={lapv:.2f}  motion={motion_score:.2f}  real={real_prob:.3f}")
 
     # === 3) Đưa vào buffer 5-frame ===
@@ -484,9 +596,12 @@ def face_detect():
     fail_reason = None
     is_real = False
     spoof_confidence = float(1.0 - avg_real5)
-
+    # Bypass gate nếu low motion nhưng real prob cao
+    if avg_motion5 < MOTION_THR and avg_real5 > 0.9:
+        print("[GATE BYPASS] Low motion but high real prob → pass")
+        is_real = True
     # GATE 1: kích thước khuôn mặt
-    if min_face5 < MIN_FACE_SIZE:
+    elif min_face5 < MIN_FACE_SIZE:
         fail_reason = f"Face too small ({min_face5}px < {MIN_FACE_SIZE})"
         print(f"[GATE FAIL] {fail_reason}")
 
@@ -504,7 +619,6 @@ def face_detect():
     elif avg_real5 < LIVE_THRESHOLD:
         fail_reason = f"Low live probability ({avg_real5:.3f} < {LIVE_THRESHOLD})"
         print(f"[GATE FAIL] {fail_reason}")
-
     # Nếu qua hết 4 gate
     else:
         is_real = True

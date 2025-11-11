@@ -166,6 +166,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // CHANGED: downscale khi gửi server
         const targetW = 640;
         const targetH = 640;
+        
         if (canvasCapture.width !== targetW || canvasCapture.height !== targetH) {
             canvasCapture.width = targetW;
             canvasCapture.height = targetH;
@@ -304,9 +305,9 @@ document.addEventListener('DOMContentLoaded', function() {
             const paddingX = bboxWidth * paddingPercent;
             const paddingY = bboxHeight * paddingPercent;
             const x1p = Math.max(x1 - paddingX, 0);
-            const y1p = Math.max(y1 - (bboxHeight * (paddingPercent + 0.15)), 0);
+            const y1p = Math.max(y1 - (bboxHeight * (paddingPercent + 0.10)), 0);
             const x2p = Math.min(x2 + paddingX, overlay.width);
-            const y2p = Math.min(y2 + (bboxHeight * (paddingPercent + 0.18)), overlay.height);
+            const y2p = Math.min(y2 + (bboxHeight * (paddingPercent + 0.13)), overlay.height);
             const isFake = lastName && lastName.includes('FAKE');
             const isPending = lastName && lastName.includes('Đang kiểm tra');
             const isPausedState = isPaused;
