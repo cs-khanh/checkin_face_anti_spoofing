@@ -3,20 +3,23 @@ Flask==2.3.3
 gunicorn==21.2.0
 
 # Computer Vision
-opencv-python==4.8.0.74
-numpy==1.24.3
+# PyTorch (CUDA 11.8)
+torch==2.3.1+cu118
+torchvision==0.18.1+cu118
+torchaudio==2.3.1+cu118
 
-# Face Recognition
+--extra-index-url https://download.pytorch.org/whl/cu118
+
+onnxruntime-gpu==1.16.3
+
 insightface==0.7.3
-onnxruntime-gpu==1.15.1  # Hoặc onnxruntime==1.15.1 nếu không có GPU
 
-# Anti-Spoofing (Face Liveness Detection)
-torch>=1.10.0  # PyTorch for MiniFASNet
-torchvision>=0.11.0
+numpy==1.23.5 
+scipy==1.10.1
 
-# Vector Search
-faiss-cpu==1.7.4  # Hoặc faiss-gpu nếu có GPU
+opencv-python==4.10.0.84 
+opencv-python-headless==4.10.0.84
 
 # Utilities
-Pillow==10.0.0
+Pillow==10.0.1
 

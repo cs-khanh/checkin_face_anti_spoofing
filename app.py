@@ -16,7 +16,7 @@ import onnxruntime as ort
 from collections import deque
 import time
 import random
-
+root_path = '/home/coder/trong/computervision/checkin_face_anti_spoofing/'
 last_frame_time = None  
 FRAME_TIMEOUT = 2.0  # giây
 
@@ -32,7 +32,7 @@ prev_face_gray = None
 MOTION_THR = 2.0    # ngưỡng chuyển động (tune theo camera)
 
 # ================== Anti-spoof (ONNX) ==================
-onnx_path = "/home/coder/trong/computer_vision/face_auth_system/version2/trained_models/face_anti_spoofing/weights/antispoof_80x80.onnx"
+onnx_path = root_path + "trained_models/face_anti_spoofing/weights/antispoof_80x80.onnx"
 
 # ONNX session (CUDA -> CPU fallback đã cấu hình bên dưới)
 sess = ort.InferenceSession(onnx_path, providers=['CUDAExecutionProvider','CPUExecutionProvider'])
@@ -184,9 +184,9 @@ def predict_anti_spoof_facecrop(face_bgr80):
 warnings.filterwarnings('ignore', category=UserWarning, module='onnxruntime')
 
 DRAW_LAND = True
-DET_PATH = "/home/coder/trong/computer_vision/face_auth_system/version2/trained_models/detection/det_10g.onnx"
-EMB_PATH      = "/home/coder/trong/computer_vision/face_auth_system/version2/trained_models/recognition/w600k_r50.onnx"
-TEMPLATES_NPZ = "/home/coder/trong/computer_vision/face_auth_system/version2/trained_models/artifacts/templates.npz"
+DET_PATH = root_path + "trained_models/detection/det_10g.onnx"
+EMB_PATH      = root_path + "trained_models/recognition/w600k_r50.onnx"
+TEMPLATES_NPZ = root_path + "trained_models/artifacts/templates.npz"
 THRESH        = 0.40  # cosine similarity threshold để nhận diện
 
 # GPU Configuration
@@ -273,12 +273,12 @@ def sanitize_embs(embs: np.ndarray) -> np.ndarray:
         embs = embs.reshape(embs.shape[0], -1)
     return np.ascontiguousarray(embs.astype(np.float32))
 
-names, embs = load_templates(TEMPLATES_NPZ)
-embs = sanitize_embs(embs)
-faiss_index = faiss.IndexFlatIP(embs.shape[1])
-print(embs.shape)
-faiss_index.add(embs)
-print(f"[GALLERY] identities={len(names)}  dim={embs.shape[1] if embs.size else 0}")
+# names, embs = load_templates(TEMPLATES_NPZ)
+# embs = sanitize_embs(embs)
+# faiss_index = faiss.IndexFlatIP(embs.shape[1])
+# print(embs.shape)
+# faiss_index.add(embs)
+# print(f"[GALLERY] identities={len(names)}  dim={embs.shape[1] if embs.size else 0}")
 print(f"[Start App] Face Recognition ✅")
 
 # ========= UTILS =========

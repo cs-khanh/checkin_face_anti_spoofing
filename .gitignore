@@ -1,6 +1,6 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
-
+.env_cv/
 data_embedding/
 *.jpg
 *.npz
