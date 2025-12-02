@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Thu Thập Ảnh Khuôn Mặt</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/collect.css') }}">
+</head>
+<body class="collect-page">
+    <div class="collect-container">
+        <!-- Header -->
+        <header class="collect-header">
+            <h1><i class="fas fa-camera"></i> Thu Thập Ảnh Khuôn Mặt</h1>
+            <div class="collect-header-actions">
+                <a href="{{ url_for('collect_admin_login') }}" class="collect-btn collect-btn-outline">
+                    <i class="fas fa-cog"></i> Quản lý
+                </a>
+                <a href="{{ url_for('index') }}" class="collect-btn collect-btn-secondary">
+                    <i class="fas fa-home"></i> Trang chủ
+                </a>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="collect-main">
+            <!-- Left Panel - Form -->
+            <section class="collect-form-section">
+                <h2><i class="fas fa-user-edit"></i> Thông Tin Nhân Viên</h2>
+                
+                <div class="collect-form-group">
+                    <label for="collectEmpId">
+                        <i class="fas fa-id-badge"></i> Mã nhân viên
+                    </label>
+                    <input type="text" 
+                           id="collectEmpId" 
+                           placeholder="VD: NV01, NV02..." 
+                           maxlength="4"
+                           autocomplete="off">
+                    <span class="collect-error-text" id="collectEmpIdError"></span>
+                    <small class="collect-hint">Định dạng: NV + 2 chữ số (VD: NV01)</small>
+                </div>
+                
+                <div class="collect-form-group">
+                    <label for="collectName">
+                        <i class="fas fa-user"></i> Họ và tên
+                    </label>
+                    <input type="text" 
+                           id="collectName" 
+                           placeholder="VD: Nguyen_Van_A" 
+                           autocomplete="off">
+                    <span class="collect-error-text" id="collectNameError"></span>
+                    <small class="collect-hint">Chỉ dùng chữ cái không dấu và gạch dưới</small>
+                </div>
+
+                <!-- Progress -->
+                <div class="collect-progress-section">
+                    <label><i class="fas fa-chart-bar"></i> Tiến độ thu thập</label>
+                    <div class="collect-progress-bar">
+                        <div class="collect-progress-fill" id="collectProgressFill"></div>
+                    </div>
+                    <div class="collect-progress-text">
+                        <span id="collectProgressText">0/60</span>
+                    </div>
+                </div>
+
+                <!-- Preview -->
+                <div class="collect-preview-section">
+                    <label><i class="fas fa-images"></i> Ảnh vừa chụp</label>
+                    <div class="collect-preview-container" id="collectPreviewContainer">
+                        <!-- Preview images will be added here -->
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Panel - Camera -->
+            <section class="collect-camera-section">
+                <div class="collect-camera-wrapper">
+                    <div class="collect-camera-container">
+                        <video id="collectVideo" autoplay playsinline></video>
+                        <canvas id="collectCanvas" style="display: none;"></canvas>
+                        <div class="collect-camera-overlay show" id="collectCameraOverlay">
+                            <i class="fas fa-camera"></i>
+                            <p>Bấm "Bật Camera" để bắt đầu</p>
+                        </div>
+                        <div class="collect-camera-info">
+                            <span class="collect-camera-info-item emp-id" id="collectCameraEmpIdContainer" style="display: none;">
+                                <i class="fas fa-user"></i> <span id="collectCameraEmpId"></span>
+                            </span>
+                            <span class="collect-camera-info-item counter">
+                                <i class="fas fa-images"></i> <span id="collectCameraCounter">0/60</span>
+                            </span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Camera Controls -->
+                <div class="collect-camera-controls">
+                    <button class="collect-btn collect-btn-primary" id="collectToggleCamera">
+                        <i class="fas fa-video"></i> Bật Camera
+                    </button>
+                    <button class="collect-btn collect-btn-secondary" id="collectSwitchCamera">
+                        <i class="fas fa-sync-alt"></i> Đổi Camera
+                    </button>
+                </div>
+
+                <!-- Capture Button -->
+                <button class="collect-btn collect-btn-capture" id="collectCaptureBtn" disabled>
+                    <i class="fas fa-camera"></i> Chụp Ảnh
+                </button>
+                <p class="collect-capture-hint">Hoặc nhấn phím <kbd>Space</kbd> để chụp</p>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="collect-footer">
+            <p>© 2026 Face Data Collector | Tích hợp trong hệ thống Check-in</p>
+        </footer>
+    </div>
+
+    <!-- Toast Container -->
+    <div class="collect-toast-container" id="collectToastContainer"></div>
+
+    <script src="{{ url_for('static', filename='js/collect_main.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Đăng Nhập Quản Trị - Thu Thập Ảnh</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/collect.css') }}">
+</head>
+<body class="collect-login-page">
+    <div class="collect-login-container">
+        <div class="collect-login-box">
+            <div class="collect-login-header">
+                <i class="fas fa-user-shield"></i>
+                <h1>Đăng Nhập Quản Trị</h1>
+                <p>Quản lý dữ liệu thu thập ảnh khuôn mặt</p>
+            </div>
+
+            {% if error %}
+            <div class="collect-alert collect-alert-error">
+                <i class="fas fa-exclamation-circle"></i>
+                {{ error }}
+            </div>
+            {% endif %}
+
+            <form method="POST" class="collect-login-form">
+                <div class="collect-form-group">
+                    <label for="username">
+                        <i class="fas fa-user"></i> Tên đăng nhập
+                    </label>
+                    <input type="text" 
+                           id="username" 
+                           name="username" 
+                           required 
+                           autocomplete="username"
+                           placeholder="Nhập tên đăng nhập">
+                </div>
+
+                <div class="collect-form-group">
+                    <label for="password">
+                        <i class="fas fa-lock"></i> Mật khẩu
+                    </label>
+                    <input type="password" 
+                           id="password" 
+                           name="password" 
+                           required 
+                           autocomplete="current-password"
+                           placeholder="Nhập mật khẩu">
+                </div>
+
+                <button type="submit" class="collect-btn collect-btn-primary collect-btn-full">
+                    <i class="fas fa-sign-in-alt"></i> Đăng Nhập
+                </button>
+            </form>
+
+            <div class="collect-login-footer">
+                <a href="{{ url_for('collect_index') }}" class="collect-link">
+                    <i class="fas fa-arrow-left"></i> Quay lại trang thu thập
+                </a>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

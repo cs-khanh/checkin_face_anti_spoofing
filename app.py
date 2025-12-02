@@ -1,4 +1,4 @@
-from flask import Flask, render_template, url_for, jsonify, request, flash, redirect, session
+from flask import Flask, render_template, url_for, jsonify, request, flash, redirect, session, send_from_directory
 import sys
 import os
 import time
@@ -9,16 +9,30 @@ import cv2
 import faiss
 from insightface.model_zoo.arcface_onnx import ArcFaceONNX
 from threading import Lock
-from functools import lru_cache
+from functools import lru_cache, wraps
 import hashlib
 import warnings
 import onnxruntime as ort
 from collections import deque
 import time
 import random
+import base64
+import re
+from PIL import Image
+import io
 root_path = '/home/coder/trong/computervision/checkin_face_anti_spoofing/'
 last_frame_time = None  
 FRAME_TIMEOUT = 2.0  # giây
+
+# ===== Collect Data Config =====
+COLLECT_OUTPUT_DIR = os.path.join(root_path, 'collect_output')
+COLLECT_ADMIN_USERNAME = 'admin'
+COLLECT_ADMIN_PASSWORD = 'admin'
+MAX_IMAGES_PER_PERSON = 60
+
+# Tạo thư mục output cho collect_data nếu chưa tồn tại
+if not os.path.exists(COLLECT_OUTPUT_DIR):
+    os.makedirs(COLLECT_OUTPUT_DIR)
 
 # ===== Temporal gate state (5-frame window) =====
 WINDOW_N = 5
@@ -689,6 +703,370 @@ def face_detect():
     prev_face_gray = None
     print("[RESET] Cleared 5-frame buffers after decision.")
     return jsonify(result), 200
+
+
+# ================== Collect Data Functions ==================
+
+def collect_login_required(f):
+    """Decorator kiểm tra đăng nhập admin cho collect data"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get('collect_admin_logged_in'):
+            return redirect(url_for('collect_admin_login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+def validate_employee_id(emp_id):
+    """Kiểm tra định dạng mã nhân viên (NV + đúng 2 chữ số: NV01, NV02,...)"""
+    pattern = r'^NV\d{2}$'
+    return bool(re.match(pattern, emp_id, re.IGNORECASE))
+
+
+def validate_name(name):
+    """Kiểm tra họ tên (chỉ chữ cái không dấu và gạch dưới)"""
+    pattern = r'^[a-zA-Z_]+$'
+    return bool(re.match(pattern, name))
+
+
+def get_folder_name(emp_id, name):
+    """Tạo tên thư mục từ mã NV và họ tên"""
+    return f"{emp_id.upper()}_{name}"
+
+
+def count_images(folder_path):
+    """Đếm số ảnh trong thư mục"""
+    if not os.path.exists(folder_path):
+        return 0
+    return len([f for f in os.listdir(folder_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+
+
+def get_next_image_number(folder_path):
+    """Lấy số thứ tự ảnh tiếp theo"""
+    if not os.path.exists(folder_path):
+        return 1
+    
+    existing_files = [f for f in os.listdir(folder_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+    if not existing_files:
+        return 1
+    
+    numbers = []
+    for f in existing_files:
+        match = re.search(r'image_(\d+)', f)
+        if match:
+            numbers.append(int(match.group(1)))
+    
+    return max(numbers) + 1 if numbers else 1
+
+
+# ================== Collect Data Routes ==================
+
+@app.route('/collect')
+def collect_index():
+    """Trang thu thập ảnh chính"""
+    return render_template('collect.html')
+
+
+@app.route('/collect/admin/login', methods=['GET', 'POST'])
+def collect_admin_login():
+    """Trang đăng nhập admin cho collect data"""
+    if request.method == 'POST':
+        username = request.form.get('username', '')
+        password = request.form.get('password', '')
+        
+        if username == COLLECT_ADMIN_USERNAME and password == COLLECT_ADMIN_PASSWORD:
+            session['collect_admin_logged_in'] = True
+            return redirect(url_for('collect_admin_gallery'))
+        else:
+            return render_template('collect_login.html', error='Sai tên đăng nhập hoặc mật khẩu!')
+    
+    return render_template('collect_login.html')
+
+
+@app.route('/collect/admin/logout')
+def collect_admin_logout():
+    """Đăng xuất admin collect data"""
+    session.pop('collect_admin_logged_in', None)
+    return redirect(url_for('collect_admin_login'))
+
+
+@app.route('/collect/admin/gallery')
+@collect_login_required
+def collect_admin_gallery():
+    """Trang thư viện ảnh (chỉ admin)"""
+    return render_template('collect_gallery.html')
+
+
+# ================== Collect Data API Endpoints ==================
+
+@app.route('/collect/api/capture', methods=['POST'])
+def collect_api_capture():
+    """API lưu ảnh từ base64"""
+    try:
+        data = request.get_json()
+        
+        emp_id = data.get('emp_id', '').strip()
+        name = data.get('name', '').strip()
+        image_data = data.get('image', '')
+        
+        if not validate_employee_id(emp_id):
+            return jsonify({
+                'success': False,
+                'message': 'Mã nhân viên không hợp lệ! Định dạng: NV + 2 chữ số (VD: NV01, NV02)'
+            }), 400
+        
+        if not validate_name(name):
+            return jsonify({
+                'success': False,
+                'message': 'Họ tên không hợp lệ! Chỉ chấp nhận chữ cái không dấu và gạch dưới'
+            }), 400
+        
+        folder_name = get_folder_name(emp_id, name)
+        folder_path = os.path.join(COLLECT_OUTPUT_DIR, folder_name)
+        
+        current_count = count_images(folder_path)
+        if current_count >= MAX_IMAGES_PER_PERSON:
+            return jsonify({
+                'success': False,
+                'message': f'Đã đạt giới hạn {MAX_IMAGES_PER_PERSON} ảnh cho người này!'
+            }), 400
+        
+        if not os.path.exists(folder_path):
+            os.makedirs(folder_path)
+        
+        try:
+            if ',' in image_data:
+                image_data = image_data.split(',')[1]
+            
+            image_bytes = base64.b64decode(image_data)
+            image = Image.open(io.BytesIO(image_bytes))
+            
+            if image.mode in ('RGBA', 'P'):
+                image = image.convert('RGB')
+            
+            image_number = get_next_image_number(folder_path)
+            filename = f"image_{image_number:03d}.jpg"
+            filepath = os.path.join(folder_path, filename)
+            
+            image.save(filepath, 'JPEG', quality=95)
+            
+            return jsonify({
+                'success': True,
+                'message': f'Đã lưu ảnh {filename}',
+                'filename': filename,
+                'count': current_count + 1,
+                'max': MAX_IMAGES_PER_PERSON
+            })
+            
+        except Exception as e:
+            return jsonify({
+                'success': False,
+                'message': f'Lỗi khi xử lý ảnh: {str(e)}'
+            }), 500
+            
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': f'Lỗi server: {str(e)}'
+        }), 500
+
+
+@app.route('/collect/api/list_persons', methods=['GET'])
+def collect_api_list_persons():
+    """API lấy danh sách người đã thu thập"""
+    try:
+        persons = []
+        
+        if os.path.exists(COLLECT_OUTPUT_DIR):
+            for folder_name in os.listdir(COLLECT_OUTPUT_DIR):
+                folder_path = os.path.join(COLLECT_OUTPUT_DIR, folder_name)
+                if os.path.isdir(folder_path):
+                    image_count = count_images(folder_path)
+                    # Get thumbnail (first image)
+                    thumbnail = None
+                    for f in os.listdir(folder_path):
+                        if f.lower().endswith(('.jpg', '.jpeg', '.png')):
+                            thumbnail = f
+                            break
+                    
+                    persons.append({
+                        'folder': folder_name,
+                        'count': image_count,
+                        'thumbnail': thumbnail
+                    })
+        
+        persons.sort(key=lambda x: x['folder'])
+        
+        return jsonify({
+            'success': True,
+            'persons': persons
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': f'Lỗi: {str(e)}'
+        }), 500
+
+
+@app.route('/collect/api/list_images', methods=['GET'])
+def collect_api_list_images():
+    """API lấy danh sách ảnh của một người"""
+    try:
+        folder = request.args.get('folder', '').strip()
+        
+        if not folder:
+            return jsonify({
+                'success': False,
+                'message': 'Thiếu thông tin folder'
+            }), 400
+        
+        folder_path = os.path.join(COLLECT_OUTPUT_DIR, folder)
+        
+        if not os.path.exists(folder_path):
+            return jsonify({
+                'success': False,
+                'message': 'Không tìm thấy thư mục'
+            }), 404
+        
+        images = []
+        for filename in os.listdir(folder_path):
+            if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+                images.append({
+                    'filename': filename,
+                    'url': f'/collect/output/{folder}/{filename}'
+                })
+        
+        images.sort(key=lambda x: x['filename'])
+        
+        return jsonify({
+            'success': True,
+            'images': images,
+            'count': len(images)
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': f'Lỗi: {str(e)}'
+        }), 500
+
+
+@app.route('/collect/api/delete_image', methods=['POST'])
+@collect_login_required
+def collect_api_delete_image():
+    """API xóa một ảnh"""
+    try:
+        data = request.get_json()
+        folder = data.get('folder', '')
+        filename = data.get('filename', '')
+        
+        if not folder or not filename:
+            return jsonify({
+                'success': False,
+                'message': 'Thiếu thông tin folder hoặc filename'
+            }), 400
+        
+        filepath = os.path.join(COLLECT_OUTPUT_DIR, folder, filename)
+        
+        if not os.path.exists(filepath):
+            return jsonify({
+                'success': False,
+                'message': 'Không tìm thấy file'
+            }), 404
+        
+        os.remove(filepath)
+        
+        return jsonify({
+            'success': True,
+            'message': f'Đã xóa {filename}'
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': f'Lỗi: {str(e)}'
+        }), 500
+
+
+@app.route('/collect/api/delete_person', methods=['POST'])
+@collect_login_required
+def collect_api_delete_person():
+    """API xóa toàn bộ thư mục của một người"""
+    try:
+        data = request.get_json()
+        folder = data.get('folder', '')
+        
+        if not folder:
+            return jsonify({
+                'success': False,
+                'message': 'Thiếu thông tin folder'
+            }), 400
+        
+        folder_path = os.path.join(COLLECT_OUTPUT_DIR, folder)
+        
+        if not os.path.exists(folder_path):
+            return jsonify({
+                'success': False,
+                'message': 'Không tìm thấy thư mục'
+            }), 404
+        
+        for filename in os.listdir(folder_path):
+            filepath = os.path.join(folder_path, filename)
+            if os.path.isfile(filepath):
+                os.remove(filepath)
+        
+        os.rmdir(folder_path)
+        
+        return jsonify({
+            'success': True,
+            'message': f'Đã xóa thư mục {folder}'
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': f'Lỗi: {str(e)}'
+        }), 500
+
+
+@app.route('/collect/api/get_count', methods=['GET'])
+def collect_api_get_count():
+    """API lấy số ảnh hiện tại của một người"""
+    try:
+        emp_id = request.args.get('emp_id', '').strip()
+        name = request.args.get('name', '').strip()
+        
+        if not emp_id or not name:
+            return jsonify({
+                'success': True,
+                'count': 0,
+                'max': MAX_IMAGES_PER_PERSON
+            })
+        
+        folder_name = get_folder_name(emp_id, name)
+        folder_path = os.path.join(COLLECT_OUTPUT_DIR, folder_name)
+        
+        count = count_images(folder_path)
+        
+        return jsonify({
+            'success': True,
+            'count': count,
+            'max': MAX_IMAGES_PER_PERSON
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': f'Lỗi: {str(e)}'
+        }), 500
+
+
+@app.route('/collect/output/<path:filepath>')
+def collect_serve_output(filepath):
+    """Phục vụ file ảnh từ thư mục collect_output"""
+    return send_from_directory(COLLECT_OUTPUT_DIR, filepath)
+
 
     # if min_side < MIN_FACE_SIZE:
     #     is_real = False

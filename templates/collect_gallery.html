@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quản Lý Gallery - Thu Thập Ảnh</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/collect.css') }}">
+</head>
+<body class="collect-gallery-page">
+    <div class="collect-gallery-container">
+        <!-- Header -->
+        <header class="collect-gallery-header">
+            <div class="collect-gallery-title">
+                <h1><i class="fas fa-images"></i> Quản Lý Gallery</h1>
+                <p>Xem và quản lý ảnh đã thu thập</p>
+            </div>
+            <div class="collect-gallery-actions">
+                <a href="{{ url_for('collect_index') }}" class="collect-btn collect-btn-secondary">
+                    <i class="fas fa-camera"></i> Thu thập
+                </a>
+                <a href="{{ url_for('collect_admin_logout') }}" class="collect-btn collect-btn-outline">
+                    <i class="fas fa-sign-out-alt"></i> Đăng xuất
+                </a>
+            </div>
+        </header>
+
+        <!-- Stats -->
+        <div class="collect-gallery-stats">
+            <div class="collect-stat-card">
+                <i class="fas fa-users"></i>
+                <div class="collect-stat-info">
+                    <span class="collect-stat-value" id="collectStatsTotalPersons">0</span>
+                    <span class="collect-stat-label">Người</span>
+                </div>
+            </div>
+            <div class="collect-stat-card">
+                <i class="fas fa-images"></i>
+                <div class="collect-stat-info">
+                    <span class="collect-stat-value" id="collectStatsTotalImages">0</span>
+                    <span class="collect-stat-label">Ảnh</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Toolbar -->
+        <div class="collect-gallery-toolbar">
+            <div class="collect-toolbar-left">
+                <button class="collect-btn collect-btn-secondary" id="collectBackToPersons" style="display: none;">
+                    <i class="fas fa-arrow-left"></i> Quay lại
+                </button>
+                <h2 id="collectPersonTitle">Danh sách</h2>
+            </div>
+            <div class="collect-toolbar-right">
+                <div class="collect-search-box">
+                    <i class="fas fa-search"></i>
+                    <input type="text" id="collectSearchInput" placeholder="Tìm kiếm...">
+                </div>
+                <select id="collectSortSelect" class="collect-select">
+                    <option value="name-asc">Tên A-Z</option>
+                    <option value="name-desc">Tên Z-A</option>
+                    <option value="count-desc">Số ảnh giảm dần</option>
+                    <option value="count-asc">Số ảnh tăng dần</option>
+                </select>
+                <button class="collect-btn collect-btn-danger" id="collectDeleteAllBtn" style="display: none;">
+                    <i class="fas fa-trash"></i> Xóa tất cả
+                </button>
+            </div>
+        </div>
+
+        <!-- Content -->
+        <main class="collect-gallery-content">
+            <!-- Person Grid -->
+            <div class="collect-person-grid" id="collectPersonGrid">
+                <!-- Person cards will be rendered here -->
+            </div>
+
+            <!-- Image Grid -->
+            <div class="collect-image-grid" id="collectImageGrid" style="display: none;">
+                <!-- Image cards will be rendered here -->
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="collect-gallery-footer">
+            <p>© 2026 Face Data Collector | Quản trị Gallery</p>
+        </footer>
+    </div>
+
+    <!-- Image Modal -->
+    <div class="collect-modal" id="collectModal">
+        <div class="collect-modal-content">
+            <button class="collect-modal-close">&times;</button>
+            <img id="collectModalImage" src="" alt="Preview">
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div class="collect-toast-container" id="collectToastContainer"></div>
+
+    <script src="{{ url_for('static', filename='js/collect_gallery.js') }}"></script>
+</body>
+</html>

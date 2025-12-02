@@ -1,6 +1,6 @@
-conda create --prefix /home/coder/trong/checkin_face_anti_spoofing/.env_cv/ python=3.9.19 -y
+conda create --prefix /home/coder/trong/computervision/checkin_face_anti_spoofing/.env_cv/ python=3.9.19 -y
 
-conda activate /home/coder/trong/checkin_face_anti_spoofing/.env_cv
+conda activate /home/coder/trong/computervision/checkin_face_anti_spoofing/.env_cv
 
 pip install torch==2.3.1+cu118 torchvision==0.18.1+cu118 torchaudio==2.3.1+cu118 --index-url https://download.pytorch.org/whl/cu118
 
