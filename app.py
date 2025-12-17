@@ -598,6 +598,19 @@ def api_checkin():
             conn = db_pool.getconn()
             cursor = conn.cursor()
             
+            # FIXED: Kiểm tra xem emp_code có tồn tại không (trước khi insert)
+            cursor.execute("SELECT emp_code, full_name FROM employees WHERE emp_code = %s", (emp_code,))
+            emp_exists = cursor.fetchone()
+            
+            if not emp_exists:
+                conn.rollback()
+                cursor.close()
+                db_pool.putconn(conn)
+                return jsonify({
+                    'success': False,
+                    'message': f'Mã nhân viên {emp_code} không tồn tại trong hệ thống.'
+                }), 400
+            
             # Insert checkin event with image_uri
             cursor.execute(
                 """INSERT INTO checkin_events (emp_code, match_score, image_uri, device_name, note)
@@ -608,12 +621,13 @@ def api_checkin():
             
             result = cursor.fetchone()
             if result is None:
+                # Trigger dedup_checkin_event đã chặn (check-in trong vòng 30s)
                 conn.rollback()
                 cursor.close()
                 db_pool.putconn(conn)
                 return jsonify({
                     'success': False,
-                    'message': f'Không thể ghi nhận check-in. Mã nhân viên {emp_code} có thể không tồn tại trong hệ thống.'
+                    'message': f'Bạn đã check-in gần đây (trong vòng 30 giây). Vui lòng đợi thêm.'
                 }), 400
                 
             event_id, event_time, work_date = result

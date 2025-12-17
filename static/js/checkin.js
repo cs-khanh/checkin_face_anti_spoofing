@@ -19,6 +19,29 @@ document.addEventListener('DOMContentLoaded', function() {
     const canvasCaptureCtx = canvasCapture.getContext('2d');
     const canvasMotion = document.createElement('canvas');
     const canvasMotionCtx = canvasMotion.getContext('2d');
+    const canvasSnapshot = document.createElement('canvas'); // Canvas để lưu snapshot khi pause
+    const canvasSnapshotCtx = canvasSnapshot.getContext('2d');
+    
+    // FIXED: Tạo IMG element để hiển thị snapshot với CÙNG CSS như video
+    const snapshotImage = document.createElement('img');
+    snapshotImage.id = 'snapshot-overlay';
+    snapshotImage.style.cssText = `
+        position: absolute;
+        min-width: 100%;
+        min-height: 100%;
+        width: auto;
+        height: auto;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%) scaleX(-1);
+        display: none;
+        pointer-events: none;
+        z-index: 5;
+    `;
+    videoElement.parentElement.appendChild(snapshotImage);
+    
+    // FIXED: Set z-index cho canvas overlay cao hơn snapshot để bounding box hiển thị lên trên
+    overlay.style.zIndex = '10';
     
     // Variables
     let currentStream = null;
@@ -37,15 +60,27 @@ document.addEventListener('DOMContentLoaded', function() {
     let lastDetectTime = 0;
     const detectInterval = 80; // ms giữa 2 lần detect (~20fps) - giảm để tăng tốc độ
     let capturedImageData = null; // Lưu ảnh đã capture để dùng cho check-in
+    let hasSnapshot = false; // Flag để biết có snapshot hay không
+    let isCheckingIn = false; // Flag để prevent double check-in
 
     // ================== HÀM QUẢN LÝ PAUSE / RESUME ==================
     function resumeDetection() {
         isPaused = false;
+        hasSnapshot = false; // Clear snapshot flag
+        isCheckingIn = false; // Reset check-in flag
+        
+        // FIXED: Ẩn snapshot image và hiện video
+        snapshotImage.style.display = 'none';
+        videoElement.style.display = 'block';
+        
         // Reset isProcessing khi resume để cho phép detection tiếp tục
         isProcessing = false;
+        
+        // Play video lại
         if (currentStream) {
             try { videoElement.play(); } catch(e) {}
         }
+        
         // Restart detection loop khi resume
         if (detectionRafId === null) {
             startDetectionFace();
@@ -54,7 +89,33 @@ document.addEventListener('DOMContentLoaded', function() {
 
     function pauseDetection(ms) {
         isPaused = true;
+        
+        // FIXED: Capture snapshot và hiển thị bằng IMG element (cùng CSS như video)
+        // Chỉ capture nếu chưa có snapshot (tránh capture lại khi pause nested)
+        if (!hasSnapshot && videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
+            const vw = videoElement.videoWidth;
+            const vh = videoElement.videoHeight;
+            canvasSnapshot.width = vw;
+            canvasSnapshot.height = vh;
+            // KHÔNG mirror vì IMG element sẽ có scaleX(-1) trong CSS
+            canvasSnapshotCtx.drawImage(videoElement, 0, 0, vw, vh);
+            
+            // Convert canvas sang base64 và set làm src của IMG
+            const snapshotData = canvasSnapshot.toDataURL('image/jpeg', 0.95);
+            snapshotImage.src = snapshotData;
+            
+            hasSnapshot = true;
+        }
+        
+        // CRITICAL: Luôn ẩn video và hiện snapshot khi pause (ngay cả khi pause lần 2)
+        if (hasSnapshot) {
+            snapshotImage.style.display = 'block';
+            videoElement.style.display = 'none';
+        }
+        
+        // Pause video để tiết kiệm tài nguyên
         try { videoElement.pause(); } catch(e) {}
+        
         // Cancel requestAnimationFrame để dừng detection loop hoàn toàn
         if (detectionRafId !== null) {
             cancelAnimationFrame(detectionRafId);
@@ -140,6 +201,10 @@ document.addEventListener('DOMContentLoaded', function() {
             resumeTimer = null;
         }
         isPaused = false;
+        hasSnapshot = false;
+        // FIXED: Cleanup snapshot image
+        snapshotImage.style.display = 'none';
+        videoElement.style.display = 'block';
     }
 
     function calculateMotion() {
@@ -265,25 +330,27 @@ document.addEventListener('DOMContentLoaded', function() {
                         capturedImageData = tempCanvas.toDataURL('image/jpeg', 0.75);
                     }
                     
-                    if (data.similarity < 0.7) {
+                    if (data.similarity < 0.8) {
                         // Cần xác nhận → modal sẽ tự pause
                         showConfirmationModal(
                             data.employee_name || 'Unknown',
                             data.employee_id || 'Unknown',
                             data.similarity,
                             () => {
+                                // FIXED: KHÔNG resume ở đây! Modal đã xử lý logic resume/pause
+                                // Chỉ cập nhật thông tin hiển thị
                                 lastBbox = data.bbox;
                                 lastName = data.employee_name || 'Unknown';
                                 lastConfidence = data.similarity;
                                 infoMessage.innerHTML = '';
                                 infoMessage.className = '';
-                                resumeDetection(); // CHANGED: resume ngay khi user xác nhận
                             },
                             () => {
+                                // User nhấn "Không" → reset thông tin
                                 lastBbox = null;
                                 lastName = null;
                                 lastConfidence = null;
-                                resumeDetection();
+                                // Modal sẽ tự resume khi đóng (qua data-should-resume='true')
                             },
                             data
                         );
@@ -352,6 +419,10 @@ document.addEventListener('DOMContentLoaded', function() {
             overlay.height = videoElement.videoHeight;
         }
         overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+        
+        // FIXED: KHÔNG vẽ snapshot lên overlay canvas nữa
+        // Snapshot được hiển thị bằng IMG element có cùng CSS như video
+        
         if (lastBbox) {
             const [x1, y1, x2, y2] = lastBbox.map(v => Math.round(v));
             const bboxWidth = x2 - x1;
@@ -413,25 +484,46 @@ document.addEventListener('DOMContentLoaded', function() {
             `;
             document.body.appendChild(modalEl);
 
-            modalEl.querySelector('#confirm-yes-checkin').addEventListener('click', () => {
-                const bs = modalEl._bsModalInstance;
-                if (bs) bs.hide();
-                if (typeof onConfirm === 'function') onConfirm();
-                // Call check-in after confirmation
-                if (fullData) {
-                    performCheckIn(fullData.employee_name, fullData.employee_id, fullData.similarity);
-                }
-            });
-            modalEl.querySelector('#confirm-no').addEventListener('click', () => {
-                const bs = modalEl._bsModalInstance;
-                if (bs) bs.hide();
-                if (typeof onCancel === 'function') onCancel();
-            });
-
             modalEl.addEventListener('hidden.bs.modal', () => {
-                resumeDetection();
+                // CHỈ resume nếu user nhấn "Không", không resume nếu nhấn "Có, Check-in"
+                // Kiểm tra attribute để quyết định
+                if (modalEl.getAttribute('data-should-resume') === 'true') {
+                    resumeDetection();
+                }
+                // Reset attribute cho lần sau
+                modalEl.removeAttribute('data-should-resume');
             });
         }
+        
+        // Setup button handlers cho lần show này
+        const yesBtn = modalEl.querySelector('#confirm-yes-checkin');
+        const noBtn = modalEl.querySelector('#confirm-no');
+        
+        // Clone và replace để xóa old listeners
+        const newYesBtn = yesBtn.cloneNode(true);
+        const newNoBtn = noBtn.cloneNode(true);
+        yesBtn.parentNode.replaceChild(newYesBtn, yesBtn);
+        noBtn.parentNode.replaceChild(newNoBtn, noBtn);
+        
+        newYesBtn.addEventListener('click', () => {
+            // FIXED: Đánh dấu KHÔNG resume khi đóng modal (vì sẽ check-in)
+            modalEl.setAttribute('data-should-resume', 'false');
+            const bs = modalEl._bsModalInstance;
+            if (bs) bs.hide();
+            if (typeof onConfirm === 'function') onConfirm();
+            // Call check-in after confirmation
+            if (fullData) {
+                performCheckIn(fullData.employee_name, fullData.employee_id, fullData.similarity);
+            }
+        });
+        
+        newNoBtn.addEventListener('click', () => {
+            // User từ chối → cho phép resume
+            modalEl.setAttribute('data-should-resume', 'true');
+            const bs = modalEl._bsModalInstance;
+            if (bs) bs.hide();
+            if (typeof onCancel === 'function') onCancel();
+        });
 
         const nameEl = modalEl.querySelector('#confirm-name');
         const empCodeEl = modalEl.querySelector('#confirm-empcode');
@@ -448,12 +540,14 @@ document.addEventListener('DOMContentLoaded', function() {
             if (ok) {
                 if (typeof onConfirm === 'function') onConfirm();
                 if (fullData) {
+                    // FIXED: Không resume khi check-in, performCheckIn sẽ xử lý pause
                     performCheckIn(fullData.employee_name, fullData.employee_id, fullData.similarity);
                 }
             } else {
                 if (typeof onCancel === 'function') onCancel();
+                // CHỈ resume khi user nhấn Cancel/Không
+                resumeDetection();
             }
-            resumeDetection();
         }
     }
 
@@ -521,6 +615,13 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function performCheckIn(employeeName, empCode, matchScore) {
+        // FIXED: Prevent double check-in
+        if (isCheckingIn) {
+            console.log('Check-in already in progress, skipping...');
+            return;
+        }
+        isCheckingIn = true;
+        
         // Pause detection ngay lập tức để dừng mọi API call
         pauseDetection();
         
@@ -548,14 +649,17 @@ document.addEventListener('DOMContentLoaded', function() {
                     emp_code: empCode,
                     event_time: new Date().toISOString()
                 });
+                // isCheckingIn sẽ được reset khi resume (sau khi đóng modal)
             } else {
                 showErrorToast(`❌ ${data.message}`);
+                isCheckingIn = false; // Reset flag
                 resumeDetection();
             }
         })
         .catch(error => {
             console.error('Check-in error:', error);
             showErrorToast('❌ Lỗi kết nối với máy chủ');
+            isCheckingIn = false; // Reset flag
             resumeDetection();
         });
     }
