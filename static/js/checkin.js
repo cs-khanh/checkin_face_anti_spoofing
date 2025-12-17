@@ -29,25 +29,37 @@ document.addEventListener('DOMContentLoaded', function() {
     let detectionTimeout = null; // (giữ lại nhưng không dùng nữa)
     let detectionRafId = null;   // CHANGED: id của rAF detect
     let lastFrameData = null;
-    const motionThreshold = 0.01;
+    const motionThreshold = 0.01; // Ngưỡng phát hiện chuyển động
     let isProcessing = false;
     let isPaused = false;
     let resumeTimer = null;
     // CHANGED: throttle detect
     let lastDetectTime = 0;
-    const detectInterval = 100; // ms giữa 2 lần detect (~6-7fps)
+    const detectInterval = 80; // ms giữa 2 lần detect (~20fps) - giảm để tăng tốc độ
+    let capturedImageData = null; // Lưu ảnh đã capture để dùng cho check-in
 
     // ================== HÀM QUẢN LÝ PAUSE / RESUME ==================
     function resumeDetection() {
         isPaused = false;
+        // Reset isProcessing khi resume để cho phép detection tiếp tục
+        isProcessing = false;
         if (currentStream) {
             try { videoElement.play(); } catch(e) {}
+        }
+        // Restart detection loop khi resume
+        if (detectionRafId === null) {
+            startDetectionFace();
         }
     }
 
     function pauseDetection(ms) {
         isPaused = true;
         try { videoElement.pause(); } catch(e) {}
+        // Cancel requestAnimationFrame để dừng detection loop hoàn toàn
+        if (detectionRafId !== null) {
+            cancelAnimationFrame(detectionRafId);
+            detectionRafId = null;
+        }
         if (resumeTimer) {
             clearTimeout(resumeTimer);
             resumeTimer = null;
@@ -177,10 +189,10 @@ document.addEventListener('DOMContentLoaded', function() {
         canvasCaptureCtx.drawImage(videoElement, -targetW, 0, targetW, targetH);
         canvasCaptureCtx.restore();
 
-        // CHANGED: giảm quality ảnh
+        // CHANGED: giảm quality ảnh để tăng tốc độ encode
         canvasCapture.toBlob(function(blob) {
             detectionFace(blob);
-        }, 'image/jpeg', 0.9);
+        }, 'image/jpeg', 0.7);
     }
 
     function startDetectionFace() {
@@ -203,6 +215,13 @@ document.addEventListener('DOMContentLoaded', function() {
         fetch('/face_detect', { method: 'POST', body: formData })
         .then(response => response.json())
         .then(data => {
+            // CRITICAL: Kiểm tra isPaused trước khi xử lý response
+            // Vì có thể user đã pause trong lúc chờ response
+            if (isPaused) {
+                console.log('[SKIP] Response received but detection is paused');
+                return;
+            }
+            
             if (data.pending === true) {
                 lastBbox = data.bbox || null;
                 lastName = '⏳ Đang kiểm tra...';
@@ -231,11 +250,26 @@ document.addEventListener('DOMContentLoaded', function() {
                     `;
                     infoMessage.className = 'alert alert-danger';
                 } else if (data.success && data.bbox && data.confidence > 0.6) {
-                    if (data.similarity < 0.8) {
-                        // Cần xác nhận → pause tới khi user thao tác
-                        pauseDetection();
+                    // Capture frame ngay khi detect thành công (trước khi pause)
+                    if (data.similarity >= 0.75) {
+                        const tempCanvas = document.createElement('canvas');
+                        tempCanvas.width = videoElement.videoWidth || 640;
+                        tempCanvas.height = videoElement.videoHeight || 480;
+                        const tempCtx = tempCanvas.getContext('2d');
+                        // Mirror image như ở overlay
+                        tempCtx.save();
+                        tempCtx.scale(-1, 1);
+                        tempCtx.drawImage(videoElement, -tempCanvas.width, 0, tempCanvas.width, tempCanvas.height);
+                        tempCtx.restore();
+                        // Lưu base64 data
+                        capturedImageData = tempCanvas.toDataURL('image/jpeg', 0.75);
+                    }
+                    
+                    if (data.similarity < 0.7) {
+                        // Cần xác nhận → modal sẽ tự pause
                         showConfirmationModal(
                             data.employee_name || 'Unknown',
+                            data.employee_id || 'Unknown',
                             data.similarity,
                             () => {
                                 lastBbox = data.bbox;
@@ -250,10 +284,23 @@ document.addEventListener('DOMContentLoaded', function() {
                                 lastName = null;
                                 lastConfidence = null;
                                 resumeDetection();
-                            }
+                            },
+                            data
                         );
                     } else {
-                        // Success bình thường: KHÔNG pause nữa để tránh giật
+                        // Success cao → check-in luôn không cần hỏi
+                        // COMMENTED: Nếu muốn hỏi xác nhận trước khi check-in, uncomment phần dưới
+                        /*
+                        pauseDetection();
+                        showCheckInModal(
+                            data.employee_name || 'Unknown',
+                            data.employee_id || 'Unknown',
+                            data.similarity,
+                            data
+                        );
+                        */
+                        
+                        // Check-in trực tiếp khi similarity >= 0.8
                         lastBbox = data.bbox;
                         lastName = data.employee_name ?? 'Unknown';
                         lastConfidence = data.similarity;
@@ -261,6 +308,10 @@ document.addEventListener('DOMContentLoaded', function() {
                             infoMessage.innerHTML = '';
                             infoMessage.className = '';
                         }
+                        // Set isProcessing để block các capture mới ngay lập tức
+                        isProcessing = true;
+                        // Gọi performCheckIn trực tiếp
+                        performCheckIn(data.employee_name, data.employee_id, data.similarity);
                     }
                 } else {
                     // Không đạt → không pause để tránh giật; chỉ reset state
@@ -287,7 +338,11 @@ document.addEventListener('DOMContentLoaded', function() {
             // CHANGED: không pause khi lỗi, tránh giật
         })
         .finally(() => {
-            isProcessing = false;
+            // Chỉ reset isProcessing nếu không bị pause
+            // Nếu đã pause, giữ isProcessing = true để ngăn capture frame mới
+            if (!isPaused) {
+                isProcessing = false;
+            }
         });
     }
 
@@ -325,7 +380,10 @@ document.addEventListener('DOMContentLoaded', function() {
         requestAnimationFrame(drawOverlay);
     }
 
-    function showConfirmationModal(name, similarity, onConfirm, onCancel) {
+    function showConfirmationModal(name, empCode, similarity, onConfirm, onCancel, fullData) {
+        // Pause detection ngay lập tức khi modal hiện lên
+        pauseDetection();
+        
         const simPct = Math.round((similarity || 0) * 100) / 100;
         let modalEl = document.getElementById('confirm-similarity-modal');
         if (!modalEl) {
@@ -342,22 +400,27 @@ document.addEventListener('DOMContentLoaded', function() {
                     </div>
                     <div class="modal-body">
                         <p>Hệ thống nhận dạng: <strong id="confirm-name"></strong></p>
+                        <p>Mã NV: <strong id="confirm-empcode"></strong></p>
                         <p>Độ tương đồng: <strong id="confirm-sim"></strong></p>
                         <p>Bạn có chắc đó là người này không?</p>
                     </div>
                     <div class="modal-footer">
                         <button type="button" class="btn btn-secondary" id="confirm-no">Không</button>
-                        <button type="button" class="btn btn-primary" id="confirm-yes">Có</button>
+                        <button type="button" class="btn btn-primary" id="confirm-yes-checkin">Có, Check-in</button>
                     </div>
                     </div>
                 </div>
             `;
             document.body.appendChild(modalEl);
 
-            modalEl.querySelector('#confirm-yes').addEventListener('click', () => {
+            modalEl.querySelector('#confirm-yes-checkin').addEventListener('click', () => {
                 const bs = modalEl._bsModalInstance;
                 if (bs) bs.hide();
                 if (typeof onConfirm === 'function') onConfirm();
+                // Call check-in after confirmation
+                if (fullData) {
+                    performCheckIn(fullData.employee_name, fullData.employee_id, fullData.similarity);
+                }
             });
             modalEl.querySelector('#confirm-no').addEventListener('click', () => {
                 const bs = modalEl._bsModalInstance;
@@ -371,21 +434,283 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         const nameEl = modalEl.querySelector('#confirm-name');
+        const empCodeEl = modalEl.querySelector('#confirm-empcode');
         const simEl = modalEl.querySelector('#confirm-sim');
         if (nameEl) nameEl.textContent = name || 'Unknown';
+        if (empCodeEl) empCodeEl.textContent = empCode || 'Unknown';
         if (simEl) simEl.textContent = `${Math.round((similarity || 0) * 100)}%`;
 
         if (window.bootstrap && typeof window.bootstrap.Modal === 'function') {
             if (!modalEl._bsModalInstance) modalEl._bsModalInstance = new bootstrap.Modal(modalEl, { backdrop: 'static', keyboard: false });
             modalEl._bsModalInstance.show();
         } else {
-            const ok = window.confirm(`Xác nhận: ${name}\nĐộ tương đồng: ${Math.round((similarity||0)*100)}%\n\nCó chắc đây là người này không?`);
+            const ok = window.confirm(`Xác nhận: ${name} (${empCode})\nĐộ tương đồng: ${Math.round((similarity||0)*100)}%\n\nCó chắc đây là người này không?`);
             if (ok) {
                 if (typeof onConfirm === 'function') onConfirm();
+                if (fullData) {
+                    performCheckIn(fullData.employee_name, fullData.employee_id, fullData.similarity);
+                }
             } else {
                 if (typeof onCancel === 'function') onCancel();
             }
             resumeDetection();
+        }
+    }
+
+    function showCheckInModal(name, empCode, similarity, fullData) {
+        let modalEl = document.getElementById('checkin-modal');
+        if (!modalEl) {
+            modalEl = document.createElement('div');
+            modalEl.id = 'checkin-modal';
+            modalEl.className = 'modal fade';
+            modalEl.tabIndex = -1;
+            modalEl.innerHTML = `
+                <div class="modal-dialog modal-dialog-centered">
+                    <div class="modal-content">
+                    <div class="modal-header bg-primary text-white">
+                        <h5 class="modal-title"><i class="bi bi-person-check"></i> Xác nhận Check-in</h5>
+                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body text-center">
+                        <i class="bi bi-person-circle" style="font-size: 4rem; color: #0d6efd;"></i>
+                        <h4 class="mt-3" id="checkin-name"></h4>
+                        <p class="text-muted mb-1">Mã NV: <strong id="checkin-empcode"></strong></p>
+                        <p class="text-muted">Độ chính xác: <strong id="checkin-sim"></strong></p>
+                        <hr>
+                        <p>Bạn muốn check-in?</p>
+                    </div>
+                    <div class="modal-footer justify-content-center">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Hủy</button>
+                        <button type="button" class="btn btn-success" id="checkin-confirm-btn">
+                            <i class="bi bi-check-circle"></i> Check-in
+                        </button>
+                    </div>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modalEl);
+
+            modalEl.querySelector('#checkin-confirm-btn').addEventListener('click', () => {
+                const bs = modalEl._bsModalInstance;
+                if (bs) bs.hide();
+                performCheckIn(fullData.employee_name, fullData.employee_id, fullData.similarity);
+            });
+
+            modalEl.addEventListener('hidden.bs.modal', () => {
+                resumeDetection();
+            });
+        }
+
+        const nameEl = modalEl.querySelector('#checkin-name');
+        const empCodeEl = modalEl.querySelector('#checkin-empcode');
+        const simEl = modalEl.querySelector('#checkin-sim');
+        if (nameEl) nameEl.textContent = name || 'Unknown';
+        if (empCodeEl) empCodeEl.textContent = empCode || 'Unknown';
+        if (simEl) simEl.textContent = `${Math.round((similarity || 0) * 100)}%`;
+
+        if (window.bootstrap && typeof window.bootstrap.Modal === 'function') {
+            if (!modalEl._bsModalInstance) modalEl._bsModalInstance = new bootstrap.Modal(modalEl, { backdrop: 'static', keyboard: false });
+            modalEl._bsModalInstance.show();
+        } else {
+            const ok = window.confirm(`Check-in cho: ${name} (${empCode})?`);
+            if (ok) {
+                performCheckIn(fullData.employee_name, fullData.employee_id, fullData.similarity);
+            }
+            resumeDetection();
+        }
+    }
+
+    function performCheckIn(employeeName, empCode, matchScore) {
+        // Pause detection ngay lập tức để dừng mọi API call
+        pauseDetection();
+        
+        // Dùng ảnh đã capture từ biến toàn cục (capture ngay khi detect)
+        const imageData = capturedImageData || '';
+        
+        fetch('/api/checkin', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                emp_code: empCode,
+                employee_name: employeeName,
+                match_score: matchScore,
+                image: imageData
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                // Hiển thị modal thành công thay vì toast
+                showCheckinSuccessModal(data.data || {
+                    employee_name: employeeName,
+                    emp_code: empCode,
+                    event_time: new Date().toISOString()
+                });
+            } else {
+                showErrorToast(`❌ ${data.message}`);
+                resumeDetection();
+            }
+        })
+        .catch(error => {
+            console.error('Check-in error:', error);
+            showErrorToast('❌ Lỗi kết nối với máy chủ');
+            resumeDetection();
+        });
+    }
+
+    function showSuccessToast(message) {
+        const toastHtml = `
+            <div class="toast align-items-center text-white bg-success border-0" role="alert" aria-live="assertive" aria-atomic="true">
+                <div class="d-flex">
+                    <div class="toast-body">
+                        ${message}
+                    </div>
+                    <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+                </div>
+            </div>
+        `;
+        showToast(toastHtml);
+    }
+
+    function showErrorToast(message) {
+        const toastHtml = `
+            <div class="toast align-items-center text-white bg-danger border-0" role="alert" aria-live="assertive" aria-atomic="true">
+                <div class="d-flex">
+                    <div class="toast-body">
+                        ${message}
+                    </div>
+                    <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+                </div>
+            </div>
+        `;
+        showToast(toastHtml);
+    }
+
+    function showToast(toastHtml) {
+        let container = document.getElementById('toast-container');
+        if (!container) {
+            container = document.createElement('div');
+            container.id = 'toast-container';
+            container.className = 'toast-container position-fixed top-0 end-0 p-3';
+            container.style.zIndex = '9999';
+            document.body.appendChild(container);
+        }
+        
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = toastHtml;
+        const toastEl = tempDiv.firstElementChild;
+        container.appendChild(toastEl);
+        
+        if (window.bootstrap && typeof window.bootstrap.Toast === 'function') {
+            const toast = new bootstrap.Toast(toastEl, { delay: 3000 });
+            toast.show();
+            toastEl.addEventListener('hidden.bs.toast', () => {
+                toastEl.remove();
+            });
+        } else {
+            alert(toastEl.querySelector('.toast-body').textContent);
+            toastEl.remove();
+        }
+    }
+
+    function showCheckinSuccessModal(data) {
+        let modalEl = document.getElementById('checkin-success-modal');
+        if (!modalEl) {
+            modalEl = document.createElement('div');
+            modalEl.id = 'checkin-success-modal';
+            modalEl.className = 'modal fade';
+            modalEl.tabIndex = -1;
+            modalEl.innerHTML = `
+                <div class="modal-dialog modal-dialog-centered">
+                    <div class="modal-content">
+                        <div class="modal-header bg-success text-white">
+                            <h5 class="modal-title">
+                                <i class="bi bi-check-circle-fill"></i> Check-in thành công!
+                            </h5>
+                        </div>
+                        <div class="modal-body text-center py-4">
+                            <div class="mb-3">
+                                <i class="bi bi-person-check-fill text-success" style="font-size: 5rem;"></i>
+                            </div>
+                            <h3 class="text-success mb-3" id="success-name"></h3>
+                            <div class="text-start mx-auto" style="max-width: 350px;">
+                                <p class="mb-2">
+                                    <strong>Mã nhân viên:</strong> 
+                                    <span id="success-empcode" class="text-primary"></span>
+                                </p>
+                                <p class="mb-2">
+                                    <strong>Thời gian:</strong> 
+                                    <span id="success-time"></span>
+                                </p>
+                                <p class="mb-2">
+                                    <strong>Ngày làm việc:</strong> 
+                                    <span id="success-date"></span>
+                                </p>
+                                <p class="mb-0">
+                                    <strong>Độ chính xác:</strong> 
+                                    <span id="success-score" class="badge bg-success"></span>
+                                </p>
+                            </div>
+                        </div>
+                        <div class="modal-footer justify-content-center">
+                            <button type="button" class="btn btn-primary btn-lg" data-bs-dismiss="modal">
+                                <i class="bi bi-x-circle"></i> Đóng
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modalEl);
+
+            modalEl.addEventListener('hidden.bs.modal', () => {
+                // Đợi 2 giây sau khi đóng modal mới resume detection
+                setTimeout(() => {
+                    resumeDetection();
+                }, 2000);
+            });
+        }
+
+        // Update modal content
+        const nameEl = modalEl.querySelector('#success-name');
+        const empCodeEl = modalEl.querySelector('#success-empcode');
+        const timeEl = modalEl.querySelector('#success-time');
+        const dateEl = modalEl.querySelector('#success-date');
+        const scoreEl = modalEl.querySelector('#success-score');
+
+        if (nameEl) nameEl.textContent = data.employee_name || 'Unknown';
+        if (empCodeEl) empCodeEl.textContent = data.emp_code || 'Unknown';
+        
+        if (timeEl) {
+            const eventTime = data.event_time ? new Date(data.event_time) : new Date();
+            timeEl.textContent = eventTime.toLocaleTimeString('vi-VN');
+        }
+        
+        if (dateEl) {
+            const workDate = data.work_date ? new Date(data.work_date) : new Date();
+            dateEl.textContent = workDate.toLocaleDateString('vi-VN');
+        }
+        
+        if (scoreEl) {
+            const score = Math.round((data.match_score || 0) * 100);
+            scoreEl.textContent = `${score}%`;
+        }
+
+        // Show modal
+        if (window.bootstrap && typeof window.bootstrap.Modal === 'function') {
+            if (!modalEl._bsModalInstance) {
+                modalEl._bsModalInstance = new bootstrap.Modal(modalEl, { 
+                    backdrop: 'static', 
+                    keyboard: false 
+                });
+            }
+            modalEl._bsModalInstance.show();
+        } else {
+            alert(`✅ Check-in thành công!\n${data.employee_name} (${data.emp_code})`);
+            setTimeout(() => {
+                resumeDetection();
+            }, 2000);
         }
     }
 

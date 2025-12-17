@@ -51,6 +51,11 @@ MAX_IMAGES_PER_PERSON = 60
 if not os.path.exists(COLLECT_OUTPUT_DIR):
     os.makedirs(COLLECT_OUTPUT_DIR)
 
+# ===== Check-in Images Config =====
+CHECKIN_IMAGES_DIR = os.path.join(root_path, 'checkin_images')
+if not os.path.exists(CHECKIN_IMAGES_DIR):
+    os.makedirs(CHECKIN_IMAGES_DIR)
+
 # ===== Temporal gate state (5-frame window) =====
 WINDOW_N = 5
 real_buf   = deque(maxlen=WINDOW_N)
@@ -321,7 +326,7 @@ def verify_login(username, password):
     """
     if not db_pool:
         print("❌ Database pool not available")
-        return False
+        return False, 'Database unavailable'
     
     conn = None
     try:
@@ -342,20 +347,29 @@ def verify_login(username, password):
             stored_username, stored_password_hash, role = result
             # So sánh password hash
             if check_password_hash(stored_password_hash, password):
+                # Only allow users with role 'admin' to login
+                try:
+                    role_normalized = (role or '').strip().lower()
+                except Exception:
+                    role_normalized = ''
+                if role_normalized != 'admin':
+                    msg = f"Tài khoản '{stored_username}' không đủ quyền (admin required)"
+                    print(f"❌ Login denied: user {stored_username} has role '{role}' (admin required)")
+                    return False, msg
                 print(f"✅ Login successful: {stored_username} (role: {role})")
-                return True
+                return True, None
             else:
                 print(f"❌ Login failed: Invalid password for {username}")
-                return False
+                return False, 'Tên đăng nhập hoặc mật khẩu không đúng'
         else:
             print(f"❌ Login failed: User {username} not found")
-            return False
+            return False, 'Tên đăng nhập hoặc mật khẩu không đúng'
             
     except Exception as e:
         print(f"❌ Database error during login: {e}")
         if conn:
             db_pool.putconn(conn)
-        return False
+        return False, f'Lỗi database: {e}'
 
 # ========= UTILS =========
 def l2n(v):
@@ -488,7 +502,8 @@ def manage():
         return redirect(url_for('index'))
     
     # Kiểm tra username và password từ database
-    if verify_login(username, password):
+    success, msg = verify_login(username, password)
+    if success:
         # Xóa CAPTCHA và đánh dấu đã đăng nhập
         session.pop('captcha_answer', None)
         session['logged_in'] = True
@@ -496,7 +511,7 @@ def manage():
         # Redirect để tránh form resubmit khi F5
         return redirect(url_for('home'))
     else:
-        flash('Tên đăng nhập hoặc mật khẩu không đúng', 'danger')
+        flash(msg or 'Tên đăng nhập hoặc mật khẩu không đúng', 'danger')
         return redirect(url_for('index'))
 
 @app.route('/home')
@@ -524,6 +539,119 @@ def monitor():
     
     # Redirect trực tiếp đến Grafana
     return redirect("https://view.csenguyenminhphuc.id.vn/")
+
+@app.route('/api/checkin', methods=['POST'])
+def api_checkin():
+    """API để ghi nhận sự kiện check-in"""
+    try:
+        data = request.get_json()
+        emp_code = data.get('emp_code')
+        employee_name = data.get('employee_name', 'Unknown')
+        match_score = data.get('match_score', 0.0)
+        image_data = data.get('image')  # base64 image data
+        
+        if not emp_code:
+            return jsonify({
+                'success': False,
+                'message': 'Thiếu mã nhân viên'
+            }), 400
+        
+        if not db_pool:
+            return jsonify({
+                'success': False,
+                'message': 'Database không khả dụng'
+            }), 500
+        
+        # Save image if provided
+        image_uri = None
+        if image_data:
+            try:
+                # Remove data URL prefix if present
+                if ',' in image_data:
+                    image_data = image_data.split(',')[1]
+                
+                # Decode base64
+                image_bytes = base64.b64decode(image_data)
+                image = Image.open(io.BytesIO(image_bytes))
+                
+                # Convert to RGB if needed
+                if image.mode in ('RGBA', 'P'):
+                    image = image.convert('RGB')
+                
+                # Generate filename: empcode_timestamp.jpg
+                timestamp = time.strftime('%Y%m%d_%H%M%S')
+                filename = f"{emp_code}_{timestamp}.jpg"
+                filepath = os.path.join(CHECKIN_IMAGES_DIR, filename)
+                
+                # Save image
+                image.save(filepath, 'JPEG', quality=95)
+                
+                # Store relative path for database
+                image_uri = f"checkin_images/{filename}"
+                
+            except Exception as e:
+                print(f"⚠️ Failed to save check-in image: {e}")
+                # Continue without image - don't fail the check-in
+        
+        conn = None
+        try:
+            conn = db_pool.getconn()
+            cursor = conn.cursor()
+            
+            # Insert checkin event with image_uri
+            cursor.execute(
+                """INSERT INTO checkin_events (emp_code, match_score, image_uri, device_name, note)
+                   VALUES (%s, %s, %s, %s, %s)
+                   RETURNING id, event_time, work_date""",
+                (emp_code, match_score, image_uri, 'WEB-KIOSK', f'Check-in via web interface')
+            )
+            
+            result = cursor.fetchone()
+            if result is None:
+                conn.rollback()
+                cursor.close()
+                db_pool.putconn(conn)
+                return jsonify({
+                    'success': False,
+                    'message': f'Không thể ghi nhận check-in. Mã nhân viên {emp_code} có thể không tồn tại trong hệ thống.'
+                }), 400
+                
+            event_id, event_time, work_date = result
+            
+            conn.commit()
+            cursor.close()
+            db_pool.putconn(conn)
+            
+            return jsonify({
+                'success': True,
+                'message': f'Check-in thành công cho {employee_name}',
+                'data': {
+                    'event_id': event_id,
+                    'emp_code': emp_code,
+                    'employee_name': employee_name,
+                    'event_time': event_time.isoformat(),
+                    'work_date': work_date.isoformat(),
+                    'match_score': match_score,
+                    'image_uri': image_uri
+                }
+            })
+            
+        except Exception as e:
+            if conn:
+                conn.rollback()
+                db_pool.putconn(conn)
+            print(f"❌ Database error during check-in: {e}")
+            return jsonify({
+                'success': False,
+                'message': f'Lỗi database: {str(e)}'
+            }), 500
+            
+    except Exception as e:
+        print(f"❌ Error in check-in API: {e}")
+        return jsonify({
+            'success': False,
+            'message': f'Lỗi server: {str(e)}'
+        }), 500
 
 @app.route('/face_detect', methods=['POST'])
 def face_detect():
@@ -836,12 +964,14 @@ def collect_admin_login():
         username = request.form.get('username', '')
         password = request.form.get('password', '')
         
-        if verify_login(username, password):
+        success, msg = verify_login(username, password)
+        if success:
             session['collect_admin_logged_in'] = True
             session['collect_username'] = username
             return redirect(url_for('collect_admin_gallery'))
         else:
-            return render_template('collect_login.html', error='Sai tên đăng nhập hoặc mật khẩu!')
+            flash(msg or 'Sai tên đăng nhập hoặc mật khẩu!', 'danger')
+            return render_template('collect_login.html', error=msg or 'Sai tên đăng nhập hoặc mật khẩu!')
     
     return render_template('collect_login.html')
 
