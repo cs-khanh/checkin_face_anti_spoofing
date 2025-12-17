@@ -1,0 +1,40 @@
+✨ Cách sử dụng mới:
+1. Interactive Mode (KHUYÊN DÙNG) ⭐
+# Chạy không cần args hoặc:python create_user_login.py add
+Demo flow:
+        ============================================================         
+        THÊM NHÂN VIÊN MỚI (Interactive Mode)
+        ============================================================
+        Mã nhân viên (VD: NV01): NV05
+        Họ và tên đầy đủ (VD: Nguyễn Văn A): Trần Văn B
+        Username đăng nhập [mặc định: NV05]: 
+        Mật khẩu (ẩn khi nhập): ********
+        Xác nhận mật khẩu: ********
+        Chọn Role:  
+        1. admin  - Quản trị viên (full access)  
+        2. root   - Super admin  
+        3. staff  - Nhân viên thường
+        Nhập số [1/2/3, mặc định: 3]: 3
+        Chọn giới tính:  M - Nam  F - Nữ  O - Khác
+        Nhập giới tính [M/F/O, để trống để bỏ qua]: M
+        Ngày sinh (YYYY-MM-DD, để trống để bỏ qua): 1995-03-15
+        ------------------------------------------------------------
+        THÔNG TIN SẼ TẠO:
+        ------------------------------------------------------------
+        Mã NV:      NV05Họ tên:     Trần Văn B
+        Username:   NV05Password:   ********
+        Role:       staff
+        Giới tính:  M
+        Ngày sinh:  1995-03-15
+        ------------------------------------------------------------
+        Xác nhận tạo nhân viên này? [y/N]: y✅ 
+        Đã tạo thành công nhân viên 
+        NV05 (Trần Văn B)   U
+        sername: NV05   
+        Role: user
+2. Single Create Mode (Quick)
+python create_user_login.py NV10 "Nguyễn Văn A" NV10 pass123 user M 1990-05-01
+3. Bulk Import Mode
+python create_user_login.py import_dir /path/to/data_face default_pass user
+4. Help
+python create_user_login.py --help

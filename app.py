@@ -479,7 +479,87 @@ def manage():
     if request.method == 'GET':
         # Kiểm tra xem user đã đăng nhập chưa
         if session.get('logged_in'):
-            return render_template('manage.html')
+            # Load data từ database
+            employees = []
+            logs = []
+            models = []
+            
+            # Query employees và logs từ database
+            if db_pool:
+                try:
+                    conn = db_pool.getconn()
+                    cursor = conn.cursor()
+                    
+                    # Lấy danh sách nhân viên (JOIN với login để lấy role)
+                    cursor.execute("""
+                        SELECT 
+                            e.emp_code, 
+                            e.full_name, 
+                            e.status, 
+                            e.face_file_uri, 
+                            e.created_at,
+                            l.role
+                        FROM employees e
+                        LEFT JOIN login l ON e.emp_code = l.emp_code
+                        ORDER BY e.emp_code ASC
+                    """)
+                    emp_rows = cursor.fetchall()
+                    for row in emp_rows:
+                        employees.append({
+                            'id': row[0],           # emp_code
+                            'name': row[1],         # full_name
+                            'status': row[2],       # status (active/inactive/suspended)
+                            'face_uri': row[3],     # face_file_uri
+                            'created_at': row[4],   # created_at
+                            'role': row[5] or 'user'  # role từ login table (admin/root/user)
+                        })
+                    
+                    # Lấy logs gần đây (15 events gần nhất)
+                    cursor.execute("""
+                        SELECT ce.event_time, e.full_name, ce.emp_code, ce.match_score, ce.device_name
+                        FROM checkin_events ce
+                        LEFT JOIN employees e ON ce.emp_code = e.emp_code
+                        ORDER BY ce.event_time DESC
+                        LIMIT 15
+                    """)
+                    log_rows = cursor.fetchall()
+                    for row in log_rows:
+                        event_time = row[0].strftime('%Y-%m-%d %H:%M:%S') if row[0] else 'N/A'
+                        emp_name = row[1] or 'Unknown'
+                        emp_code = row[2] or 'N/A'
+                        match_score = f"{row[3]*100:.1f}%" if row[3] is not None else 'N/A'
+                        device = row[4] or 'Unknown'
+                        logs.append(f"[{event_time}] {emp_name} ({emp_code}) - Score: {match_score} - Device: {device}")
+                    
+                    cursor.close()
+                    db_pool.putconn(conn)
+                    
+                except Exception as e:
+                    print(f"❌ Error loading manage data from DB: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            # Lấy danh sách models từ thư mục trained_models
+            models_dir = os.path.join(os.path.dirname(__file__), 'trained_models')
+            if os.path.exists(models_dir):
+                for filename in os.listdir(models_dir):
+                    filepath = os.path.join(models_dir, filename)
+                    if os.path.isfile(filepath):
+                        size_bytes = os.path.getsize(filepath)
+                        # Format size
+                        if size_bytes < 1024:
+                            size_str = f"{size_bytes} B"
+                        elif size_bytes < 1024*1024:
+                            size_str = f"{size_bytes/1024:.1f} KB"
+                        else:
+                            size_str = f"{size_bytes/(1024*1024):.1f} MB"
+                        
+                        models.append({
+                            'name': filename,
+                            'size': size_str
+                        })
+            
+            return render_template('manage.html', employees=employees, logs=logs, models=models)
         else:
             flash('Vui lòng đăng nhập để truy cập trang này.', 'warning')
             return redirect(url_for('index'))
