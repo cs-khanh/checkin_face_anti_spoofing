@@ -1,21 +1,49 @@
+import os
+import sys
+
+# Set CUDA library path BEFORE importing onnxruntime/insightface
+conda_prefix = os.environ.get('CONDA_PREFIX', '')
+if not conda_prefix:
+    # Fallback to hardcoded path if CONDA_PREFIX not set
+    conda_prefix = "/home/coder/trong/computervision/checkin_face_anti_spoofing/.env_cv"
+
+cuda_libs = [
+    f"{conda_prefix}/lib/python3.9/site-packages/nvidia/cublas/lib",
+    f"{conda_prefix}/lib/python3.9/site-packages/nvidia/cudnn/lib",
+    f"{conda_prefix}/lib/python3.9/site-packages/nvidia/cufft/lib",
+    f"{conda_prefix}/lib/python3.9/site-packages/nvidia/cuda_runtime/lib",
+]
+ld_path = os.environ.get('LD_LIBRARY_PATH', '')
+os.environ['LD_LIBRARY_PATH'] = ':'.join(cuda_libs) + ':' + ld_path
+print(f"🔧 Set CUDA libs from: {conda_prefix}")
+
 from pathlib import Path
 import numpy as np
 from insightface.model_zoo import get_model
 import cv2
 from insightface.model_zoo.arcface_onnx import ArcFaceONNX
-import os, glob
+import onnxruntime
+import glob
 
-EMB_PATH  = "/home/coder/trong/computer_vision/face_auth_system/version2/trained_models/recognition/w600k_r50.onnx"
+EMB_PATH  = "/home/coder/trong/computervision/checkin_face_anti_spoofing/trained_models/recognition/w600k_r50.onnx"
 
-providers =  ['CUDAExecutionProvider', 'CPUExecutionProvider']
+providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
 
-# Đặt ctx_id phù hợp với provider đã áp dụng
-ctx_id = 0
-print(f"Using context id: {ctx_id} providers: {providers[ctx_id]}")
-# Tạo model với providers thích hợp
+# Tạo session trước với CUDA provider
+session = onnxruntime.InferenceSession(EMB_PATH, providers=providers)
+actual_providers = session.get_providers()
 
+# Tạo model với session đã có CUDA
+rec_model = ArcFaceONNX(EMB_PATH, session=session)
 
-rec_model = ArcFaceONNX(EMB_PATH )
+# Kiểm tra provider thực tế được áp dụng
+if 'CUDAExecutionProvider' in actual_providers:
+    ctx_id = 0  # GPU
+    print(f"✅ Using GPU (CUDA) - providers: {actual_providers}")
+else:
+    ctx_id = -1  # CPU
+    print(f"⚠️ Using CPU - providers: {actual_providers}")
+
 rec_model.prepare(ctx_id=ctx_id, input_size=(112,112))
 
 def embed_112(aligned_112_bgr):
@@ -24,7 +52,7 @@ def embed_112(aligned_112_bgr):
     feat /= (np.linalg.norm(feat) + 1e-9)  # L2-normalize -> dùng cosine
     return feat
 
-def build_templates(aligned_root="/home/coder/trong/computer_vision/face_auth_system/version2/employees/data_face"):
+def build_templates(aligned_root="/home/coder/trong/computervision/checkin_face_anti_spoofing/employees/data_face"):
     names, embs = [], []
     for person in sorted(os.listdir(aligned_root)):
         print(f"[process] {person}")
@@ -65,7 +93,7 @@ def save_templates(names, embs, npz_path="artifacts/templates.npz"):
              meta={"model_id":"arcface_w600k_r50","align":"5pt_112"})
     print(f"[saved] {npz_path}  identities={len(names)}")
 
-path_root = Path("/home/coder/trong/computer_vision/face_auth_system/version2/employees/data_face")
+path_root = Path("/home/coder/trong/computervision/checkin_face_anti_spoofing/employees/data_face")
 
 def iter_employee_images(root: Path, name_emp):
     items = []
@@ -80,7 +108,7 @@ def iter_employee_images(root: Path, name_emp):
     return items
 
 # ======= enroll (thêm nhân viên mới) không cần train lại =======
-def enroll_new_person(person_name, aligned_images, templates_npz="artifacts/templates.npz", min_imgs=1):
+def enroll_new_person(person_name, aligned_images, templates_npz="/home/coder/trong/computervision/checkin_face_anti_spoofing/trained_models/recognition/artifacts/templates.npz", min_imgs=1):
     """
     person_name: tên/thư mục người mới (sẽ lower())
     aligned_images: list các path ảnh đã align 112x112
@@ -120,12 +148,12 @@ if __name__ == "__main__":
     print("rec_model type:", type(rec_model))
     print("has .prepare?", hasattr(rec_model, "prepare"))
     print("has .get?", hasattr(rec_model, "get"))
-    # if hasattr(rec_model, "get"):
-    #     try:
-    #         print("get signature:", inspect.signature(rec_model.get))
-    #     except Exception as e:
-    #         print("cannot read signature:", e)
-    # os.makedirs("artifacts", exist_ok=True)
-    # build_templates()
+    if hasattr(rec_model, "get"):
+        try:
+            print("get signature:", inspect.signature(rec_model.get))
+        except Exception as e:
+            print("cannot read signature:", e)
+    os.makedirs("artifacts", exist_ok=True)
+    build_templates()
     # Example enroll:
-    print(enroll_new_person("NV03_NguyenThanhTrong", iter_employee_images(path_root, "NV03_thanhtronggg"), min_imgs=30))
+    #print(enroll_new_person("NV03_NguyenThanhTrong", iter_employee_images(path_root, "NV03_thanhtronggg"), min_imgs=30))

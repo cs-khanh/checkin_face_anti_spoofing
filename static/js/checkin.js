@@ -35,7 +35,7 @@ document.addEventListener('DOMContentLoaded', function() {
     let resumeTimer = null;
     // CHANGED: throttle detect
     let lastDetectTime = 0;
-    const detectInterval = 150; // ms giữa 2 lần detect (~6-7fps)
+    const detectInterval = 100; // ms giữa 2 lần detect (~6-7fps)
 
     // ================== HÀM QUẢN LÝ PAUSE / RESUME ==================
     function resumeDetection() {
@@ -231,7 +231,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     `;
                     infoMessage.className = 'alert alert-danger';
                 } else if (data.success && data.bbox && data.confidence > 0.6) {
-                    if (data.similarity < 0.9) {
+                    if (data.similarity < 0.8) {
                         // Cần xác nhận → pause tới khi user thao tác
                         pauseDetection();
                         showConfirmationModal(

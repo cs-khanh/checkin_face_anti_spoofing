@@ -10,7 +10,7 @@ from tqdm import tqdm
 import csv
 
 DRAW_LAND = True
-DET_PATH = "/home/coder/trong/computer_vision/face_auth_system/version2/trained_models/detection/det_10g.onnx"
+DET_PATH = "/home/coder/trong/computervision/checkin_face_anti_spoofing/trained_models/detection/det_10g.onnx"
 
 providers =  ['CUDAExecutionProvider', 'CPUExecutionProvider']
 
@@ -61,14 +61,14 @@ def iter_employee_images(root: Path, name_emp) -> List[Tuple[str, Path]]:
 
 # ------------------------ Main processing ------------------------
 
-data_path = Path("/home/coder/trong/computer_vision/face_auth_system/version2/employees/data_collect")
-out_root = Path("/home/coder/trong/computer_vision/face_auth_system/version2/employees/data_face")
-log_path = Path("/home/coder/trong/computer_vision/face_auth_system/version2/employees/data_face_log_1.csv")
+data_path = Path("/home/coder/trong/computervision/checkin_face_anti_spoofing/collect_output")
+out_root = Path("/home/coder/trong/computervision/checkin_face_anti_spoofing/employees/data_face")
+log_path = Path("/home/coder/trong/computervision/checkin_face_anti_spoofing/employees/data_face_log_1.csv")
 
 log_rows = []
 # print(iter_employee_images(data_path, "NV03_thanhtronggg"))
 
-for emp_id, img_path in tqdm(iter_employee_images(data_path, "NV03_thanhtronggg")):
+for emp_id, img_path in tqdm(iter_employee_images(data_path, "NV04_LanNguyen")):
     img = cv2.imread(str(img_path))
     if img is None:
         print(f"[ERROR] Cannot read: {img_path}")

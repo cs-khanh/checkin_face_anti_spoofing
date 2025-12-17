@@ -20,6 +20,7 @@ const deleteAllBtn = document.getElementById('collectDeleteAllBtn');
 let allPersons = [];
 let currentPerson = null;
 let currentImages = [];
+let currentImageIndex = 0;
 
 // ============ Toast Notification ============
 function showToast(message, type = 'info') {
@@ -41,8 +42,9 @@ function showToast(message, type = 'info') {
 }
 
 // ============ Modal Functions ============
-function showModal(imageSrc) {
-    modalImage.src = imageSrc;
+function showModal(imageSrc, imageIndex = 0) {
+    currentImageIndex = imageIndex;
+    updateModalImage();
     modal.style.display = 'flex';
     document.body.style.overflow = 'hidden';
 }
@@ -50,6 +52,44 @@ function showModal(imageSrc) {
 function closeModal() {
     modal.style.display = 'none';
     document.body.style.overflow = '';
+}
+
+function updateModalImage() {
+    if (currentImages.length === 0) return;
+    
+    const img = currentImages[currentImageIndex];
+    modalImage.src = `/collect/output/${currentPerson}/${img.filename}`;
+    
+    // Update counter
+    const counter = document.getElementById('collectModalCounter');
+    if (counter) {
+        counter.textContent = `${currentImageIndex + 1} / ${currentImages.length}`;
+    }
+    
+    // Show/hide navigation buttons
+    const prevBtn = document.getElementById('collectModalPrev');
+    const nextBtn = document.getElementById('collectModalNext');
+    
+    if (prevBtn) {
+        prevBtn.style.display = currentImageIndex > 0 ? 'flex' : 'none';
+    }
+    if (nextBtn) {
+        nextBtn.style.display = currentImageIndex < currentImages.length - 1 ? 'flex' : 'none';
+    }
+}
+
+function showPreviousImage() {
+    if (currentImageIndex > 0) {
+        currentImageIndex--;
+        updateModalImage();
+    }
+}
+
+function showNextImage() {
+    if (currentImageIndex < currentImages.length - 1) {
+        currentImageIndex++;
+        updateModalImage();
+    }
 }
 
 // ============ API Functions ============
@@ -225,11 +265,12 @@ function renderImages(images) {
         return;
     }
     
-    imageGrid.innerHTML = images.map(img => `
+    imageGrid.innerHTML = images.map((img, index) => `
         <div class="collect-image-card">
             <img src="/collect/output/${currentPerson}/${img.filename}" 
                  alt="${img.filename}"
-                 onclick="showModal(this.src)">
+                 onclick="showModal(this.src, ${index})"
+                 data-index="${index}">
             <div class="collect-image-overlay">
                 <span class="collect-image-name">${img.filename}</span>
                 <button class="collect-btn collect-btn-small collect-btn-danger" 
@@ -339,9 +380,27 @@ document.addEventListener('DOMContentLoaded', () => {
         
         document.querySelector('.collect-modal-close')?.addEventListener('click', closeModal);
         
+        // Navigation buttons
+        document.getElementById('collectModalPrev')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            showPreviousImage();
+        });
+        
+        document.getElementById('collectModalNext')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            showNextImage();
+        });
+        
+        // Keyboard navigation
         document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-                closeModal();
+            if (modal.style.display === 'flex') {
+                if (e.key === 'Escape') {
+                    closeModal();
+                } else if (e.key === 'ArrowLeft') {
+                    showPreviousImage();
+                } else if (e.key === 'ArrowRight') {
+                    showNextImage();
+                }
             }
         });
     }

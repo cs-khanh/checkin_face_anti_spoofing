@@ -1,6 +1,22 @@
 from flask import Flask, render_template, url_for, jsonify, request, flash, redirect, session, send_from_directory
 import sys
 import os
+
+# Set CUDA library path BEFORE importing onnxruntime/insightface
+conda_prefix = os.environ.get('CONDA_PREFIX', '')
+if not conda_prefix:
+    # Hardcode path if CONDA_PREFIX not set
+    conda_prefix = "/home/coder/trong/computervision/checkin_face_anti_spoofing/.env_cv"
+
+cuda_libs = [
+    f"{conda_prefix}/lib/python3.9/site-packages/nvidia/cublas/lib",
+    f"{conda_prefix}/lib/python3.9/site-packages/nvidia/cudnn/lib",
+    f"{conda_prefix}/lib/python3.9/site-packages/nvidia/cufft/lib",
+    f"{conda_prefix}/lib/python3.9/site-packages/nvidia/cuda_runtime/lib",
+]
+ld_path = os.environ.get('LD_LIBRARY_PATH', '')
+os.environ['LD_LIBRARY_PATH'] = ':'.join(cuda_libs) + ':' + ld_path
+
 import time
 import numpy as np
 from insightface.model_zoo import get_model
@@ -53,7 +69,7 @@ sess = ort.InferenceSession(onnx_path, providers=['CUDAExecutionProvider','CPUEx
 
 LIVE_THRESHOLD = 0.55        # ngưỡng quyết định live/spoof (tune theo data)
 MIN_FACE_SIZE  = 120         # mặt nhỏ hơn cạnh ngắn này coi là kém chất lượng
-BLUR_VAR_THR   = 280.0        # var Laplacian < BLUR_VAR_THR coi là mờ (tune theo camera)
+BLUR_VAR_THR   = 250.0        # var Laplacian < BLUR_VAR_THR coi là mờ (tune theo camera)
 ENABLE_SHARPEN = True
 
 def enhance_face_auto(
@@ -200,7 +216,7 @@ warnings.filterwarnings('ignore', category=UserWarning, module='onnxruntime')
 DRAW_LAND = True
 DET_PATH = root_path + "trained_models/detection/det_10g.onnx"
 EMB_PATH      = root_path + "trained_models/recognition/w600k_r50.onnx"
-TEMPLATES_NPZ = root_path + "trained_models/artifacts/templates.npz"
+TEMPLATES_NPZ = root_path + "trained_models/recognition/artifacts/templates.npz"
 THRESH        = 0.40  # cosine similarity threshold để nhận diện
 
 # GPU Configuration
@@ -287,12 +303,12 @@ def sanitize_embs(embs: np.ndarray) -> np.ndarray:
         embs = embs.reshape(embs.shape[0], -1)
     return np.ascontiguousarray(embs.astype(np.float32))
 
-# names, embs = load_templates(TEMPLATES_NPZ)
-# embs = sanitize_embs(embs)
-# faiss_index = faiss.IndexFlatIP(embs.shape[1])
-# print(embs.shape)
-# faiss_index.add(embs)
-# print(f"[GALLERY] identities={len(names)}  dim={embs.shape[1] if embs.size else 0}")
+names, embs = load_templates(TEMPLATES_NPZ)
+embs = sanitize_embs(embs)
+faiss_index = faiss.IndexFlatIP(embs.shape[1])
+print(embs.shape)
+faiss_index.add(embs)
+print(f"[GALLERY] identities={len(names)}  dim={embs.shape[1] if embs.size else 0}")
 print(f"[Start App] Face Recognition ✅")
 
 # ========= UTILS =========

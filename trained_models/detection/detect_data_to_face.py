@@ -10,7 +10,7 @@ from tqdm import tqdm
 import csv
 
 DRAW_LAND = True
-DET_PATH = "/home/coder/trong/computer_vision/face_auth_system/version2/trained_models/detection/det_10g.onnx"
+DET_PATH = "/home/coder/trong/computervision/checkin_face_anti_spoofing/trained_models/detection/det_10g.onnx"
 
 providers =  ['CUDAExecutionProvider', 'CPUExecutionProvider']
 
@@ -60,9 +60,9 @@ def iter_employee_images(root: Path) -> List[Tuple[str, Path]]:
 
 # ------------------------ Main processing ------------------------
 
-data_path = Path("/home/coder/trong/computer_vision/face_auth_system/version2/employees/data_collect")
-out_root = Path("/home/coder/trong/computer_vision/face_auth_system/version2/employees/data_face")
-log_path = Path("/home/coder/trong/computer_vision/face_auth_system/version2/employees/data_face_log.csv")
+data_path = Path("/home/coder/trong/computervision/checkin_face_anti_spoofing/collect_output")
+out_root = Path("/home/coder/trong/computervision/checkin_face_anti_spoofing/employees/data_face")
+log_path = Path("/home/coder/trong/computervision/checkin_face_anti_spoofing/employees/data_face_log.csv")
 
 log_rows = []
 
