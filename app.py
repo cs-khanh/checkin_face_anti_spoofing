@@ -1,7 +1,8 @@
 from flask import Flask, render_template, url_for, jsonify, request, flash, redirect, session, send_from_directory
+from werkzeug.security import generate_password_hash, check_password_hash
 import sys
 import os
-
+from database.connectDB import get_db_connection
 # Set CUDA library path BEFORE importing onnxruntime/insightface
 conda_prefix = os.environ.get('CONDA_PREFIX', '')
 if not conda_prefix:
@@ -40,10 +41,10 @@ root_path = '/home/coder/trong/computervision/checkin_face_anti_spoofing/'
 last_frame_time = None  
 FRAME_TIMEOUT = 2.0  # giây
 
+db_pool = get_db_connection()
+
 # ===== Collect Data Config =====
 COLLECT_OUTPUT_DIR = os.path.join(root_path, 'collect_output')
-COLLECT_ADMIN_USERNAME = 'admin'
-COLLECT_ADMIN_PASSWORD = 'admin'
 MAX_IMAGES_PER_PERSON = 60
 
 # Tạo thư mục output cho collect_data nếu chưa tồn tại
@@ -311,6 +312,51 @@ faiss_index.add(embs)
 print(f"[GALLERY] identities={len(names)}  dim={embs.shape[1] if embs.size else 0}")
 print(f"[Start App] Face Recognition ✅")
 
+# ========= DATABASE UTILS =========
+def verify_login(username, password):
+    """
+    Kiểm tra username và password từ database PostgreSQL
+    Password trong DB phải được hash bằng werkzeug.security.generate_password_hash
+    Returns: True nếu hợp lệ, False nếu không
+    """
+    if not db_pool:
+        print("❌ Database pool not available")
+        return False
+    
+    conn = None
+    try:
+        conn = db_pool.getconn()
+        cursor = conn.cursor()
+        
+        # Lấy password hash từ database
+        cursor.execute(
+            "SELECT username, password, role FROM login WHERE username = %s",
+            (username,)
+        )
+        result = cursor.fetchone()
+        
+        cursor.close()
+        db_pool.putconn(conn)
+        
+        if result:
+            stored_username, stored_password_hash, role = result
+            # So sánh password hash
+            if check_password_hash(stored_password_hash, password):
+                print(f"✅ Login successful: {stored_username} (role: {role})")
+                return True
+            else:
+                print(f"❌ Login failed: Invalid password for {username}")
+                return False
+        else:
+            print(f"❌ Login failed: User {username} not found")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Database error during login: {e}")
+        if conn:
+            db_pool.putconn(conn)
+        return False
+
 # ========= UTILS =========
 def l2n(v):
     v = v.astype(np.float32)
@@ -441,8 +487,8 @@ def manage():
         flash('CAPTCHA phải là một số.', 'danger')
         return redirect(url_for('index'))
     
-    # Kiểm tra username và password
-    if username == 'admin' and password == 'admin':
+    # Kiểm tra username và password từ database
+    if verify_login(username, password):
         # Xóa CAPTCHA và đánh dấu đã đăng nhập
         session.pop('captcha_answer', None)
         session['logged_in'] = True
@@ -790,8 +836,9 @@ def collect_admin_login():
         username = request.form.get('username', '')
         password = request.form.get('password', '')
         
-        if username == COLLECT_ADMIN_USERNAME and password == COLLECT_ADMIN_PASSWORD:
+        if verify_login(username, password):
             session['collect_admin_logged_in'] = True
+            session['collect_username'] = username
             return redirect(url_for('collect_admin_gallery'))
         else:
             return render_template('collect_login.html', error='Sai tên đăng nhập hoặc mật khẩu!')

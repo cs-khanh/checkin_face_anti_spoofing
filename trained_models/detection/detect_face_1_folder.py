@@ -68,7 +68,7 @@ log_path = Path("/home/coder/trong/computervision/checkin_face_anti_spoofing/emp
 log_rows = []
 # print(iter_employee_images(data_path, "NV03_thanhtronggg"))
 
-for emp_id, img_path in tqdm(iter_employee_images(data_path, "NV04_LanNguyen")):
+for emp_id, img_path in tqdm(iter_employee_images(data_path, "NV07_NguyenPhuocDien")):
     img = cv2.imread(str(img_path))
     if img is None:
         print(f"[ERROR] Cannot read: {img_path}")
