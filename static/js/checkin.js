@@ -63,6 +63,31 @@ document.addEventListener('DOMContentLoaded', function() {
     let hasSnapshot = false; // Flag để biết có snapshot hay không
     let isCheckingIn = false; // Flag để prevent double check-in
 
+    // ================== HELPER FUNCTIONS ==================
+    function formatEmployeeName(name) {
+        /**
+         * Format tên nhân viên từ lowercase thành Title Case
+         * VD: "nguyen van a" -> "Nguyen Van A"
+         */
+        if (!name || name === 'unknown' || name === 'Unknown') {
+            return 'Unknown';
+        }
+        return name.split(' ')
+            .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+            .join(' ');
+    }
+
+    function formatEmployeeCode(code) {
+        /**
+         * Đảm bảo emp_code luôn UPPERCASE
+         * VD: "nv01" -> "NV01"
+         */
+        if (!code || code === 'unknown') {
+            return 'Unknown';
+        }
+        return code.toUpperCase();
+    }
+
     // ================== HÀM QUẢN LÝ PAUSE / RESUME ==================
     function resumeDetection() {
         isPaused = false;
@@ -280,6 +305,18 @@ document.addEventListener('DOMContentLoaded', function() {
         fetch('/face_detect', { method: 'POST', body: formData })
         .then(response => response.json())
         .then(data => {
+            // DEBUG: Log response từ server
+            console.log('[DETECT] Response from server:', {
+                success: data.success,
+                pending: data.pending,
+                employee_id: data.employee_id,
+                employee_name: data.employee_name,
+                similarity: data.similarity,
+                confidence: data.confidence,
+                is_real: data.is_real,
+                has_bbox: !!data.bbox
+            });
+            
             // CRITICAL: Kiểm tra isPaused trước khi xử lý response
             // Vì có thể user đã pause trong lúc chờ response
             if (isPaused) {
@@ -332,15 +369,18 @@ document.addEventListener('DOMContentLoaded', function() {
                     
                     if (data.similarity < 0.8) {
                         // Cần xác nhận → modal sẽ tự pause
+                        const formattedName = formatEmployeeName(data.employee_name);
+                        const formattedCode = formatEmployeeCode(data.employee_id);
+                        
                         showConfirmationModal(
-                            data.employee_name || 'Unknown',
-                            data.employee_id || 'Unknown',
+                            formattedName,
+                            formattedCode,
                             data.similarity,
                             () => {
                                 // FIXED: KHÔNG resume ở đây! Modal đã xử lý logic resume/pause
                                 // Chỉ cập nhật thông tin hiển thị
                                 lastBbox = data.bbox;
-                                lastName = data.employee_name || 'Unknown';
+                                lastName = formattedName;
                                 lastConfidence = data.similarity;
                                 infoMessage.innerHTML = '';
                                 infoMessage.className = '';
@@ -356,12 +396,15 @@ document.addEventListener('DOMContentLoaded', function() {
                         );
                     } else {
                         // Success cao → check-in luôn không cần hỏi
+                        const formattedName = formatEmployeeName(data.employee_name);
+                        const formattedCode = formatEmployeeCode(data.employee_id);
+                        
                         // COMMENTED: Nếu muốn hỏi xác nhận trước khi check-in, uncomment phần dưới
                         /*
                         pauseDetection();
                         showCheckInModal(
-                            data.employee_name || 'Unknown',
-                            data.employee_id || 'Unknown',
+                            formattedName,
+                            formattedCode,
                             data.similarity,
                             data
                         );
@@ -369,7 +412,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         
                         // Check-in trực tiếp khi similarity >= 0.8
                         lastBbox = data.bbox;
-                        lastName = data.employee_name ?? 'Unknown';
+                        lastName = formattedName;
                         lastConfidence = data.similarity;
                         if (infoMessage.classList.contains('alert-danger')) {
                             infoMessage.innerHTML = '';
@@ -377,7 +420,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         }
                         // Set isProcessing để block các capture mới ngay lập tức
                         isProcessing = true;
-                        // Gọi performCheckIn trực tiếp
+                        // Gọi performCheckIn trực tiếp (dùng raw data từ API, không format)
                         performCheckIn(data.employee_name, data.employee_id, data.similarity);
                     }
                 } else {
@@ -628,6 +671,21 @@ document.addEventListener('DOMContentLoaded', function() {
         // Dùng ảnh đã capture từ biến toàn cục (capture ngay khi detect)
         const imageData = capturedImageData || '';
         
+        const requestData = {
+            emp_code: empCode,
+            employee_name: employeeName,
+            match_score: matchScore,
+            image: imageData ? imageData.substring(0, 50) + '...' : '' // Log shortened image data
+        };
+        
+        // DEBUG: Log request data
+        console.log('[CHECKIN] Sending request:', {
+            emp_code: empCode,
+            employee_name: employeeName,
+            match_score: matchScore,
+            has_image: !!imageData
+        });
+        
         fetch('/api/checkin', {
             method: 'POST',
             headers: {
@@ -642,6 +700,14 @@ document.addEventListener('DOMContentLoaded', function() {
         })
         .then(response => response.json())
         .then(data => {
+            // DEBUG: Log response từ check-in API
+            console.log('[CHECKIN] Response from server:', {
+                success: data.success,
+                message: data.message,
+                has_data: !!data.data,
+                data: data.data
+            });
+            
             if (data.success) {
                 // Hiển thị modal thành công thay vì toast
                 showCheckinSuccessModal(data.data || {
@@ -651,6 +717,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 });
                 // isCheckingIn sẽ được reset khi resume (sau khi đóng modal)
             } else {
+                console.error('[CHECKIN] Failed:', data.message);
                 showErrorToast(`❌ ${data.message}`);
                 isCheckingIn = false; // Reset flag
                 resumeDetection();
@@ -783,8 +850,9 @@ document.addEventListener('DOMContentLoaded', function() {
         const dateEl = modalEl.querySelector('#success-date');
         const scoreEl = modalEl.querySelector('#success-score');
 
-        if (nameEl) nameEl.textContent = data.employee_name || 'Unknown';
-        if (empCodeEl) empCodeEl.textContent = data.emp_code || 'Unknown';
+        // FIXED: Format tên và mã nhân viên
+        if (nameEl) nameEl.textContent = formatEmployeeName(data.employee_name || 'Unknown');
+        if (empCodeEl) empCodeEl.textContent = formatEmployeeCode(data.emp_code || 'Unknown');
         
         if (timeEl) {
             const eventTime = data.event_time ? new Date(data.event_time) : new Date();
@@ -811,7 +879,9 @@ document.addEventListener('DOMContentLoaded', function() {
             }
             modalEl._bsModalInstance.show();
         } else {
-            alert(`✅ Check-in thành công!\n${data.employee_name} (${data.emp_code})`);
+            const formattedName = formatEmployeeName(data.employee_name || 'Unknown');
+            const formattedCode = formatEmployeeCode(data.emp_code || 'Unknown');
+            alert(`✅ Check-in thành công!\n${formattedName} (${formattedCode})`);
             setTimeout(() => {
                 resumeDetection();
             }, 2000);

@@ -384,17 +384,42 @@ def embed_aligned112(img112_bgr):
     feat = rec_model.get_feat(img112_bgr)
     return l2n(feat)
 
+def parse_label_from_npz(label):
+    """
+    Parse label từ npz format: 'nv01_nguyen_van_a' 
+    Returns: (emp_code, full_name)
+    VD: 'nv01_nguyen_van_a' -> ('NV01', 'nguyen van a')
+    """
+    if not label or label == 'unknown':
+        return None, 'unknown'
+    
+    parts = label.split('_')
+    if len(parts) < 2:
+        return None, label
+    
+    # Phần đầu là emp_code (in hoa)
+    emp_code = parts[0].upper()
+    # Phần còn lại là tên (nối lại với dấu cách, giữ nguyên case)
+    full_name = ' '.join(parts[1:])
+    
+    return emp_code, full_name
+
+
 def search_top(q_emb, faiss_index, topk=3):
     q_emb = sanitize_embs(q_emb)
     with faiss_lock:
         D, I = faiss_index.search(q_emb.astype(np.float32), topk)
     sims, idxs = D[0], I[0]
     if len(idxs) == 0 or idxs[0] < 0:
-        return "unknown", -1.0, -1, []
+        return "unknown", -1.0, -1, [], None
     best_sim, best_idx = float(sims[0]), int(idxs[0])
     label = names[best_idx] if best_sim >= THRESH else "unknown"
+    
+    # FIXED: Parse label để lấy emp_code và full_name
+    emp_code, full_name = parse_label_from_npz(label)
+    
     top = [(names[int(ix)], float(sims[j]), int(ix)) for j, ix in enumerate(idxs) if int(ix) >= 0]
-    return label, best_sim, best_idx, top
+    return label, best_sim, best_idx, top, emp_code
 
 def detect_faces(img):
     with detection_lock:
@@ -403,13 +428,13 @@ def detect_faces(img):
 
 def recognize_face(img, kpss):
     if kpss is None or len(kpss) == 0:
-        return "unknown", -1.0, -1, []
+        return "unknown", -1.0, -1, [], None
     kps = kpss[0]
     aligned = face_align.norm_crop(img, landmark=kps, image_size=112)
     with recognition_lock:
         q = embed_aligned112(aligned)
-    label, best_sim, best_idx, top = search_top(q, faiss_index, topk=3)
-    return label, best_sim, best_idx, top
+    label, best_sim, best_idx, top, emp_code = search_top(q, faiss_index, topk=3)
+    return label, best_sim, best_idx, top, emp_code
 
 # ================== Flask ==================
 app = Flask(__name__)
@@ -957,16 +982,22 @@ def face_detect():
         print("=============================================")
         return jsonify(result), 200
     # === Recognition khi đã pass anti-spoof window-5 ===
-    label, best_sim, best_idx, top = recognize_face(img, kpss)
+    label, best_sim, best_idx, top, emp_code = recognize_face(img, kpss)
 
+    # FIXED: Parse label để lấy emp_code và full_name
+    emp_code_parsed, full_name = parse_label_from_npz(label)
+    
+    # Sử dụng emp_code từ npz (đã uppercase), không cần query DB nữa
+    final_emp_code = emp_code_parsed or emp_code or 'unknown'
+    
     result = {
         'success': True,
         'message': 'Face detected successfully',
         'faces_count': 1,
         'bbox': [x1, y1, x2, y2],
         'confidence': conf_det,
-        'employee_id': 'NV02',
-        'employee_name': label,
+        'employee_id': final_emp_code,
+        'employee_name': full_name,
         'similarity': best_sim,
         'department': 'Kỹ thuật',
         'is_real': is_real,
