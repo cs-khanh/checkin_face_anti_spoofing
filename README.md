@@ -1,6 +1,6 @@
 # Face Authentication System v2.0 - Real-time Edition
 
-Hệ thống nhận diện khuôn mặt real-time với tối ưu hóa hiệu suất cao, hỗ trợ GPU/CPU, đạt latency ~50ms.
+Hệ thống nhận diện khuôn mặt real-time với tối ưu hóa hiệu suất cao, hỗ trợ GPU/CPU.
 
 ## 🚀 Quick Start
 
